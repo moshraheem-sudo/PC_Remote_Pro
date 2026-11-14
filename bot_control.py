@@ -8,7 +8,7 @@ import ctypes
 # Register Windows AppUserModelID early for taskbar icon binding
 if sys.platform == "win32":
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PC_Remote_Pro.UniversalHub.v4.0")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PC_Remote_Pro.UniversalHub.v4.1")
     except Exception:
         pass
 
@@ -78,6 +78,7 @@ from PIL import ImageGrab, Image, ImageDraw
 import tkinter as tk
 import customtkinter as ctk
 import tkinter.messagebox as messagebox
+from tkinter import filedialog
 
 try:
     import cv2
@@ -131,7 +132,7 @@ except Exception:
 
 # ----------------- Application Info -----------------
 APP_NAME = "PC Remote Pro"
-APP_VERSION = "v4.0"
+APP_VERSION = "v4.1"
 DEVELOPER_NAME = "Mohammed Shaheed"
 MASTER_APP_INSTANCE = None
 SECURITY_GUARD_SETTINGS = {
@@ -166,8 +167,54 @@ ACTIVE_BOT_REGISTRY = {}
 CURRENT_USER = os.getlogin() if hasattr(os, 'getlogin') else os.environ.get('USERNAME', 'User')
 
 DESKTOP_FOLDER = os.path.join(os.path.expanduser("~"), "Desktop")
-DOWNLOADS_FOLDER = os.path.join(os.path.expanduser("~"), "Downloads")
+DEFAULT_DOWNLOADS_FOLDER = os.path.join(os.path.expanduser("~"), "Downloads")
+DOWNLOADS_FOLDER = DEFAULT_DOWNLOADS_FOLDER
 DOCUMENTS_FOLDER = os.path.join(os.path.expanduser("~"), "Documents")
+
+def get_download_folder() -> str:
+    global DOWNLOADS_FOLDER
+    if not DOWNLOADS_FOLDER or not os.path.exists(DOWNLOADS_FOLDER):
+        try:
+            os.makedirs(DOWNLOADS_FOLDER, exist_ok=True)
+        except Exception:
+            DOWNLOADS_FOLDER = DEFAULT_DOWNLOADS_FOLDER
+            try:
+                os.makedirs(DOWNLOADS_FOLDER, exist_ok=True)
+            except Exception:
+                pass
+    return DOWNLOADS_FOLDER
+
+def set_download_folder(new_path: str):
+    global DOWNLOADS_FOLDER
+    if new_path and os.path.isdir(new_path):
+        DOWNLOADS_FOLDER = os.path.abspath(new_path)
+    elif new_path:
+        try:
+            os.makedirs(new_path, exist_ok=True)
+            DOWNLOADS_FOLDER = os.path.abspath(new_path)
+        except Exception:
+            pass
+
+def notify_file_saved(file_name: str, file_path: str):
+    """Triggers system notification and sound when a file is received and saved on PC."""
+    def _do():
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        except Exception:
+            pass
+
+        try:
+            if MASTER_APP_INSTANCE and MASTER_APP_INSTANCE.tray_icon:
+                short_dest = file_path if len(file_path) <= 60 else ("..." + file_path[-55:])
+                MASTER_APP_INSTANCE.tray_icon.notify(
+                    f"Saved: {file_name}\nTo: {short_dest}",
+                    "📥 PC Remote Pro - File Saved"
+                )
+        except Exception:
+            pass
+
+    threading.Thread(target=_do, daemon=True).start()
 
 PATH_STORE = {}
 PATH_TO_ID = {}
@@ -609,14 +656,17 @@ def xor_crypt(data: bytes, key: bytes) -> bytes:
     key_len = len(key)
     return bytes([b ^ key[i % key_len] for i, b in enumerate(data)])
 
-def save_config(accounts_list, autostart=True, security_guard=None):
-    global SECURITY_GUARD_SETTINGS
+def save_config(accounts_list, autostart=True, security_guard=None, download_folder=None):
+    global SECURITY_GUARD_SETTINGS, DOWNLOADS_FOLDER
     if security_guard is not None:
         SECURITY_GUARD_SETTINGS = security_guard
+    if download_folder is not None:
+        DOWNLOADS_FOLDER = download_folder
     data = {
         "accounts": accounts_list,
         "autostart": autostart,
         "security_guard": SECURITY_GUARD_SETTINGS,
+        "download_folder": DOWNLOADS_FOLDER,
         "saved_at": time.time(),
         "version": APP_VERSION
     }
@@ -669,6 +719,8 @@ def load_config():
                     if isinstance(data, dict) and "accounts" in data:
                         if "security_guard" in data and isinstance(data["security_guard"], dict):
                             SECURITY_GUARD_SETTINGS.update(data["security_guard"])
+                        if "download_folder" in data and isinstance(data["download_folder"], str):
+                            set_download_folder(data["download_folder"])
                         return data
             except Exception:
                 continue
@@ -1593,6 +1645,108 @@ def get_clipboard_text():
         return res if res else "Clipboard is currently empty."
     except Exception as e:
         return f"Failed to read clipboard: {e}"
+
+def get_safe_clipboard_text() -> str:
+    """Safely retrieves text from Windows native Unicode clipboard, Tkinter, or PowerShell."""
+    clip = get_native_clipboard_text()
+    if clip:
+        return clip
+    if MASTER_APP_INSTANCE:
+        try:
+            t = MASTER_APP_INSTANCE.clipboard_get()
+            if t:
+                return t
+        except Exception:
+            pass
+    try:
+        cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Clipboard"'
+        res = subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+        if res:
+            return res
+    except Exception:
+        pass
+    return ""
+
+def set_safe_clipboard_text(text: str) -> bool:
+    """Safely copies text to both Windows native clipboard and Tkinter."""
+    ok = set_native_clipboard_text(text)
+    if MASTER_APP_INSTANCE:
+        try:
+            MASTER_APP_INSTANCE.clipboard_clear()
+            MASTER_APP_INSTANCE.clipboard_append(text)
+            ok = True
+        except Exception:
+            pass
+    return ok
+
+def setup_universal_entry_clipboard(root_widget):
+    """
+    Globally binds Control-KeyPress on Entry to guarantee Ctrl+V, Ctrl+C, Ctrl+X, Ctrl+A
+    work on ALL keyboard layouts (Arabic, English, French, etc.) via hardware Virtual Keycodes.
+    """
+    def _on_entry_ctrl_key(event):
+        kc = event.keycode
+        state = event.state
+
+        # Check if Ctrl key is pressed
+        if not (state & 4):
+            return
+
+        w = event.widget
+        # VK_V = 86 (Paste)
+        if kc == 86 or getattr(event, 'keysym', '').lower() in ('v', 'arabic_reh', 'reh'):
+            txt = get_safe_clipboard_text()
+            if txt:
+                try:
+                    if w.selection_present():
+                        w.delete("sel.first", "sel.last")
+                except Exception:
+                    pass
+                try:
+                    w.insert("insert", txt)
+                except Exception:
+                    try:
+                        w.insert(0, txt)
+                    except Exception:
+                        pass
+            return "break"
+
+        # VK_C = 67 (Copy)
+        elif kc == 67 or getattr(event, 'keysym', '').lower() in ('c', 'arabic_waw_hamza', 'waw_hamza'):
+            try:
+                if w.selection_present():
+                    sel = w.selection_get()
+                    if sel:
+                        set_safe_clipboard_text(sel)
+            except Exception:
+                pass
+            return "break"
+
+        # VK_X = 88 (Cut)
+        elif kc == 88 or getattr(event, 'keysym', '').lower() in ('x', 'arabic_hamza', 'hamza'):
+            try:
+                if w.selection_present():
+                    sel = w.selection_get()
+                    if sel:
+                        set_safe_clipboard_text(sel)
+                    w.delete("sel.first", "sel.last")
+            except Exception:
+                pass
+            return "break"
+
+        # VK_A = 65 (Select All)
+        elif kc == 65 or getattr(event, 'keysym', '').lower() in ('a', 'arabic_sheen', 'sheen'):
+            try:
+                w.select_range(0, 'end')
+                w.icursor('end')
+            except Exception:
+                pass
+            return "break"
+
+    try:
+        root_widget.bind_class("Entry", "<Control-KeyPress>", _on_entry_ctrl_key)
+    except Exception:
+        pass
 
 def empty_recycle_bin() -> tuple[bool, str]:
     try:
@@ -3517,7 +3671,7 @@ def start_bot_thread(token: str, user_dict_ref: dict):
             await update.message.reply_text(t, reply_markup=m, parse_mode="Markdown")
             return
         elif act == "btn_downloads":
-            t, m = build_advanced_explorer(DOWNLOADS_FOLDER, 0)
+            t, m = build_advanced_explorer(get_download_folder(), 0)
             await update.message.reply_text(t, reply_markup=m, parse_mode="Markdown")
             return
         elif act == "btn_documents":
@@ -4118,7 +4272,7 @@ def start_bot_thread(token: str, user_dict_ref: dict):
             photo = photos[-1] # Largest resolution
             await update.message.reply_text("⏳ Receiving photo & copying to PC Clipboard...")
             file_obj = await context.bot.get_file(photo.file_id)
-            save_dir = os.path.join(DOWNLOADS_FOLDER, "Telegram_Photos")
+            save_dir = os.path.join(get_download_folder(), "Telegram_Photos")
             os.makedirs(save_dir, exist_ok=True)
             save_name = f"photo_{int(time.time())}.jpg"
             dest = os.path.join(save_dir, save_name)
@@ -4126,6 +4280,7 @@ def start_bot_thread(token: str, user_dict_ref: dict):
 
             # Automatically copy to PC Clipboard
             set_image_to_clipboard(dest)
+            notify_file_saved(save_name, dest)
 
             kb = [
                 [InlineKeyboardButton("🚀 Open on PC Screen", callback_data=f"open_pc:{get_path_id(dest)}")],
@@ -4151,8 +4306,9 @@ def start_bot_thread(token: str, user_dict_ref: dict):
             await update.message.reply_text("🎙️ Playing voice message through PC speakers...")
             file_obj = await context.bot.get_file(voice.file_id)
             save_name = f"voice_{int(time.time())}.ogg"
-            dest = os.path.join(DOWNLOADS_FOLDER, save_name)
+            dest = os.path.join(get_download_folder(), save_name)
             await file_obj.download_to_drive(dest)
+            notify_file_saved(save_name, dest)
             try:
                 os.startfile(dest)
                 await update.message.reply_text("🔊 **Voice message playing on computer speakers!**", reply_markup=get_menu_keyboard("main", lang))
@@ -4166,14 +4322,18 @@ def start_bot_thread(token: str, user_dict_ref: dict):
         lang = get_user_language(update.effective_user.id)
         doc = update.message.document
         if doc:
-            await update.message.reply_text(f"⏳ Saving `{doc.file_name}` into Downloads folder...", parse_mode="Markdown")
-            dest = os.path.join(DOWNLOADS_FOLDER, doc.file_name)
+            storage_dir = get_download_folder()
+            os.makedirs(storage_dir, exist_ok=True)
+            await update.message.reply_text(f"⏳ Saving `{doc.file_name}` into Storage folder...", parse_mode="Markdown")
+            dest = os.path.join(storage_dir, doc.file_name)
             tg_file = await context.bot.get_file(doc.file_id)
             await tg_file.download_to_drive(dest)
 
             # If image document, also copy to clipboard
             if doc.file_name.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp')):
                 set_image_to_clipboard(dest)
+
+            notify_file_saved(doc.file_name, dest)
 
             kb = [
                 [InlineKeyboardButton("🚀 Open on PC Screen", callback_data=f"open_pc:{get_path_id(dest)}")]
@@ -4434,16 +4594,15 @@ class MasterMiniApp(ctk.CTk):
     def __init__(self, is_silent=False):
         if sys.platform == "win32":
             try:
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PC_Remote_Pro.UniversalHub.v4.0")
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PC_Remote_Pro.UniversalHub.v4.1")
             except Exception:
                 pass
 
         super().__init__()
 
         self.title(f"{APP_NAME} - {APP_VERSION}")
-        # Compact dimensions optimized for small screens (370x520)
-        self.geometry("370x520")
-        self.minsize(350, 460)
+        self.geometry("380x540")
+        self.minsize(360, 480)
         self.resizable(True, True)
         self.attributes('-topmost', True)
         self.available_update_info = None
@@ -4490,9 +4649,16 @@ class MasterMiniApp(ctk.CTk):
         self.config = load_config()
         self.accounts = self.config.get("accounts", [])
         self.active_account = None
+        self._pending_auth_acc = None
 
         self.is_token_visible = False
         self.is_chatid_visible = False
+        self.is_pwd_new_visible = False
+        self.is_pwd_confirm_visible = False
+        self.is_auth_pwd_visible = False
+
+        # Setup universal clipboard for all Entry widgets
+        setup_universal_entry_clipboard(self)
 
         # Root Scrollable Container so nothing is ever clipped on any screen size
         self.root_scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
@@ -4500,9 +4666,12 @@ class MasterMiniApp(ctk.CTk):
 
         self.frame_dashboard = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
         self.frame_editor = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
+        self.frame_password_set = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
+        self.frame_password_auth = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
 
         self.setup_dashboard_ui()
         self.setup_editor_ui()
+        self.setup_password_ui()
 
         # Compact Footer
         self.lbl_footer = ctk.CTkLabel(
@@ -4530,7 +4699,6 @@ class MasterMiniApp(ctk.CTk):
         if self.config.get("autostart", True):
             set_windows_autostart(True)
 
-        # Always initialize dashboard contents so opening from tray is never blank
         self.show_dashboard()
 
     # ----------------- Screen 1: Dashboard UI -----------------
@@ -4560,8 +4728,62 @@ class MasterMiniApp(ctk.CTk):
         )
         self.lbl_dash_subtitle.pack(anchor="w")
 
-        self.scroll_accounts = ctk.CTkScrollableFrame(self.frame_dashboard, width=330, height=220)
+        self.scroll_accounts = ctk.CTkScrollableFrame(self.frame_dashboard, width=330, height=190)
         self.scroll_accounts.pack(padx=6, pady=4, fill="both", expand=True)
+
+        # Storage / Received Files Folder Card
+        self.frame_storage = ctk.CTkFrame(self.frame_dashboard, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
+        self.frame_storage.pack(fill="x", padx=6, pady=4)
+
+        header_storage = ctk.CTkFrame(self.frame_storage, fg_color="transparent")
+        header_storage.pack(fill="x", padx=8, pady=(6, 2))
+
+        lbl_storage_title = ctk.CTkLabel(
+            header_storage,
+            text="📁 Received Files Storage Folder:",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#00bcd4"
+        )
+        lbl_storage_title.pack(side="left")
+
+        self.lbl_storage_path = ctk.CTkLabel(
+            self.frame_storage,
+            text=get_download_folder(),
+            font=ctk.CTkFont(size=9),
+            text_color="#cccccc",
+            wraplength=310,
+            justify="left"
+        )
+        self.lbl_storage_path.pack(anchor="w", padx=8, pady=(0, 4))
+
+        btn_storage_row = ctk.CTkFrame(self.frame_storage, fg_color="transparent")
+        btn_storage_row.pack(fill="x", padx=8, pady=(0, 6))
+
+        self.btn_change_storage = ctk.CTkButton(
+            btn_storage_row,
+            text="📂 Change Folder",
+            width=150,
+            height=24,
+            fg_color="#333333",
+            hover_color="#444444",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=9, weight="bold"),
+            command=self.choose_storage_folder
+        )
+        self.btn_change_storage.pack(side="left", padx=(0, 4))
+
+        self.btn_open_storage = ctk.CTkButton(
+            btn_storage_row,
+            text="↗️ Open Folder",
+            width=150,
+            height=24,
+            fg_color="#333333",
+            hover_color="#444444",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=9, weight="bold"),
+            command=self.open_storage_folder
+        )
+        self.btn_open_storage.pack(side="left")
 
         self.chk_autostart = ctk.CTkCheckBox(
             self.frame_dashboard,
@@ -4633,6 +4855,23 @@ class MasterMiniApp(ctk.CTk):
         )
         self.lbl_dash_status.pack(pady=2)
 
+    def choose_storage_folder(self):
+        curr = get_download_folder()
+        chosen = filedialog.askdirectory(initialdir=curr, title="Select Received Files Storage Folder", parent=self)
+        if chosen:
+            set_download_folder(chosen)
+            save_config(self.accounts, autostart=bool(self.chk_autostart.get()), download_folder=chosen)
+            self.lbl_storage_path.configure(text=chosen)
+            messagebox.showinfo("Storage Folder", f"Files received from the bot will now be saved in:\n{chosen}", parent=self)
+
+    def open_storage_folder(self):
+        curr = get_download_folder()
+        try:
+            os.makedirs(curr, exist_ok=True)
+            os.startfile(curr)
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open storage folder:\n{e}", parent=self)
+
     def refresh_accounts_dashboard(self):
         for widget in self.scroll_accounts.winfo_children():
             widget.destroy()
@@ -4692,7 +4931,10 @@ class MasterMiniApp(ctk.CTk):
 
     def show_dashboard(self):
         self.frame_editor.pack_forget()
+        self.frame_password_set.pack_forget()
+        self.frame_password_auth.pack_forget()
         self.refresh_accounts_dashboard()
+        self.lbl_storage_path.configure(text=get_download_folder())
         self.frame_dashboard.pack(fill="both", expand=True)
 
     def toggle_autostart(self):
@@ -4875,6 +5117,316 @@ class MasterMiniApp(ctk.CTk):
         self.entry_chatid.configure(show="" if self.is_chatid_visible else "*")
         self.btn_eye_chatid.configure(text="🔒" if self.is_chatid_visible else "👁️")
 
+    # ----------------- Screen 3 & 4: Integrated In-App Password Management -----------------
+    def setup_password_ui(self):
+        # Frame 3: Set / Change Password View
+        self.header_pwd_set = ctk.CTkFrame(self.frame_password_set, fg_color="transparent")
+        self.header_pwd_set.pack(fill="x", padx=10, pady=(4, 2))
+
+        btn_back_pwd_set = ctk.CTkButton(
+            self.header_pwd_set,
+            text="◀ Back",
+            width=60,
+            height=24,
+            fg_color="#333333",
+            hover_color="#444444",
+            font=ctk.CTkFont(size=10),
+            command=lambda: self.show_editor(self.active_account)
+        )
+        btn_back_pwd_set.pack(side="left")
+
+        if self.logo_ctk:
+            lbl_logo_p = ctk.CTkLabel(self.header_pwd_set, image=self.logo_ctk, text="")
+            lbl_logo_p.pack(side="left", padx=(6, 2))
+
+        self.lbl_pwd_set_title = ctk.CTkLabel(
+            self.header_pwd_set,
+            text="Account Password Security",
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        self.lbl_pwd_set_title.pack(side="left", padx=4)
+
+        self.lbl_pwd_target = ctk.CTkLabel(
+            self.frame_password_set,
+            text="Account: --",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#00bcd4"
+        )
+        self.lbl_pwd_target.pack(anchor="w", padx=12, pady=(6, 2))
+
+        self.lbl_pwd_current_status = ctk.CTkLabel(
+            self.frame_password_set,
+            text="Status: Unprotected",
+            font=ctk.CTkFont(size=10),
+            text_color="gray"
+        )
+        self.lbl_pwd_current_status.pack(anchor="w", padx=12, pady=(0, 6))
+
+        # New Password Field
+        lbl_new = ctk.CTkLabel(self.frame_password_set, text="New Password:", font=ctk.CTkFont(size=10, weight="bold"))
+        lbl_new.pack(anchor="w", padx=12, pady=(2, 0))
+
+        frame_new_row = ctk.CTkFrame(self.frame_password_set, fg_color="transparent")
+        frame_new_row.pack(fill="x", padx=12, pady=(0, 2))
+
+        self.entry_pwd_new = ctk.CTkEntry(frame_new_row, width=235, height=26, show="*")
+        self.entry_pwd_new.pack(side="left", padx=(0, 3))
+
+        self.btn_eye_pwd_new = ctk.CTkButton(
+            frame_new_row, text="👁️", width=34, height=26,
+            fg_color="#333333", hover_color="#444444", text_color="#FFFFFF",
+            command=self.toggle_pwd_new_visibility
+        )
+        self.btn_eye_pwd_new.pack(side="left", padx=(0, 2))
+
+        btn_clr_new = ctk.CTkButton(
+            frame_new_row, text="✖", width=26, height=26,
+            fg_color="#c9302c", hover_color="#a02622", text_color="#FFFFFF",
+            command=lambda: self.clear_entry(self.entry_pwd_new)
+        )
+        btn_clr_new.pack(side="left")
+
+        # Confirm Password Field
+        lbl_confirm = ctk.CTkLabel(self.frame_password_set, text="Confirm New Password:", font=ctk.CTkFont(size=10, weight="bold"))
+        lbl_confirm.pack(anchor="w", padx=12, pady=(4, 0))
+
+        frame_confirm_row = ctk.CTkFrame(self.frame_password_set, fg_color="transparent")
+        frame_confirm_row.pack(fill="x", padx=12, pady=(0, 4))
+
+        self.entry_pwd_confirm = ctk.CTkEntry(frame_confirm_row, width=235, height=26, show="*")
+        self.entry_pwd_confirm.pack(side="left", padx=(0, 3))
+
+        self.btn_eye_pwd_confirm = ctk.CTkButton(
+            frame_confirm_row, text="👁️", width=34, height=26,
+            fg_color="#333333", hover_color="#444444", text_color="#FFFFFF",
+            command=self.toggle_pwd_confirm_visibility
+        )
+        self.btn_eye_pwd_confirm.pack(side="left", padx=(0, 2))
+
+        btn_clr_confirm = ctk.CTkButton(
+            frame_confirm_row, text="✖", width=26, height=26,
+            fg_color="#c9302c", hover_color="#a02622", text_color="#FFFFFF",
+            command=lambda: self.clear_entry(self.entry_pwd_confirm)
+        )
+        btn_clr_confirm.pack(side="left")
+
+        self.lbl_pwd_msg = ctk.CTkLabel(self.frame_password_set, text="", font=ctk.CTkFont(size=10, weight="bold"))
+        self.lbl_pwd_msg.pack(padx=12, pady=(2, 4))
+
+        self.btn_save_password = ctk.CTkButton(
+            self.frame_password_set,
+            text="💾 Save & Apply Password",
+            width=320,
+            height=28,
+            fg_color="#28a748",
+            hover_color="#218838",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self.save_new_password
+        )
+        self.btn_save_password.pack(pady=3)
+
+        self.btn_remove_password = ctk.CTkButton(
+            self.frame_password_set,
+            text="🔓 Remove Password Protection",
+            width=320,
+            height=26,
+            fg_color="#c9302c",
+            hover_color="#a02622",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=10),
+            command=self.remove_existing_password
+        )
+        self.btn_remove_password.pack(pady=3)
+
+        self.attach_context_menu(self.entry_pwd_new)
+        self.attach_context_menu(self.entry_pwd_confirm)
+
+        # Frame 4: In-App Authentication to Unlock Account
+        self.header_pwd_auth = ctk.CTkFrame(self.frame_password_auth, fg_color="transparent")
+        self.header_pwd_auth.pack(fill="x", padx=10, pady=(4, 2))
+
+        btn_back_auth = ctk.CTkButton(
+            self.header_pwd_auth,
+            text="◀ Back",
+            width=60,
+            height=24,
+            fg_color="#333333",
+            hover_color="#444444",
+            font=ctk.CTkFont(size=10),
+            command=self.show_dashboard
+        )
+        btn_back_auth.pack(side="left")
+
+        if self.logo_ctk:
+            lbl_logo_a = ctk.CTkLabel(self.header_pwd_auth, image=self.logo_ctk, text="")
+            lbl_logo_a.pack(side="left", padx=(6, 2))
+
+        self.lbl_auth_header = ctk.CTkLabel(
+            self.header_pwd_auth,
+            text="Security Verification",
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        self.lbl_auth_header.pack(side="left", padx=4)
+
+        card_auth = ctk.CTkFrame(self.frame_password_auth, fg_color="#202020", corner_radius=8)
+        card_auth.pack(fill="x", padx=12, pady=(12, 6))
+
+        lbl_lock_icon = ctk.CTkLabel(card_auth, text="🔒", font=ctk.CTkFont(size=28))
+        lbl_lock_icon.pack(pady=(10, 2))
+
+        self.lbl_auth_acc_name = ctk.CTkLabel(
+            card_auth,
+            text="Enter password to manage this account",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#00bcd4"
+        )
+        self.lbl_auth_acc_name.pack(pady=(0, 6))
+
+        frame_auth_input = ctk.CTkFrame(card_auth, fg_color="transparent")
+        frame_auth_input.pack(fill="x", padx=16, pady=(0, 4))
+
+        self.entry_auth_pwd = ctk.CTkEntry(frame_auth_input, width=220, height=28, show="*", placeholder_text="Enter account password")
+        self.entry_auth_pwd.pack(side="left", padx=(0, 4))
+        self.entry_auth_pwd.bind("<Return>", lambda e: self.do_unlock_account())
+
+        self.btn_eye_auth = ctk.CTkButton(
+            frame_auth_input, text="👁️", width=34, height=28,
+            fg_color="#333333", hover_color="#444444", text_color="#FFFFFF",
+            command=self.toggle_auth_visibility
+        )
+        self.btn_eye_auth.pack(side="left")
+
+        self.lbl_auth_err = ctk.CTkLabel(card_auth, text="", font=ctk.CTkFont(size=10, weight="bold"), text_color="#dc3545")
+        self.lbl_auth_err.pack(pady=(2, 6))
+
+        self.btn_unlock = ctk.CTkButton(
+            card_auth,
+            text="🔓 Unlock Account",
+            width=260,
+            height=30,
+            fg_color="#1f77b4",
+            hover_color="#145a86",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self.do_unlock_account
+        )
+        self.btn_unlock.pack(pady=(0, 10))
+
+        self.attach_context_menu(self.entry_auth_pwd)
+
+    def toggle_pwd_new_visibility(self):
+        self.is_pwd_new_visible = not self.is_pwd_new_visible
+        self.entry_pwd_new.configure(show="" if self.is_pwd_new_visible else "*")
+        self.btn_eye_pwd_new.configure(text="🔒" if self.is_pwd_new_visible else "👁️")
+
+    def toggle_pwd_confirm_visibility(self):
+        self.is_pwd_confirm_visible = not self.is_pwd_confirm_visible
+        self.entry_pwd_confirm.configure(show="" if self.is_pwd_confirm_visible else "*")
+        self.btn_eye_pwd_confirm.configure(text="🔒" if self.is_pwd_confirm_visible else "👁️")
+
+    def toggle_auth_visibility(self):
+        self.is_auth_pwd_visible = not self.is_auth_pwd_visible
+        self.entry_auth_pwd.configure(show="" if self.is_auth_pwd_visible else "*")
+        self.btn_eye_auth.configure(text="🔒" if self.is_auth_pwd_visible else "👁️")
+
+    def show_password_setup(self):
+        if not self.active_account:
+            messagebox.showwarning("Notice", "Please save the account first before setting a password.", parent=self)
+            return
+
+        self.frame_dashboard.pack_forget()
+        self.frame_editor.pack_forget()
+        self.frame_password_auth.pack_forget()
+
+        acc_name = self.active_account.get("name", "Account")
+        has_pwd = bool(self.active_account.get("pwd_hash"))
+
+        self.lbl_pwd_target.configure(text=f"Account: {acc_name}")
+        if has_pwd:
+            self.lbl_pwd_current_status.configure(text="Status: 🔒 Password protection is ACTIVE", text_color="#28a748")
+            self.btn_remove_password.pack(pady=3)
+        else:
+            self.lbl_pwd_current_status.configure(text="Status: 🔓 No password currently set", text_color="gray")
+            self.btn_remove_password.pack_forget()
+
+        self.entry_pwd_new.delete(0, "end")
+        self.entry_pwd_confirm.delete(0, "end")
+        self.entry_pwd_new.configure(show="*")
+        self.entry_pwd_confirm.configure(show="*")
+        self.btn_eye_pwd_new.configure(text="👁️")
+        self.btn_eye_pwd_confirm.configure(text="👁️")
+        self.is_pwd_new_visible = False
+        self.is_pwd_confirm_visible = False
+        self.lbl_pwd_msg.configure(text="")
+
+        self.frame_password_set.pack(fill="both", expand=True)
+
+    def save_new_password(self):
+        if not self.active_account:
+            return
+        p1 = self.entry_pwd_new.get().strip()
+        p2 = self.entry_pwd_confirm.get().strip()
+
+        if not p1:
+            self.lbl_pwd_msg.configure(text="⚠️ Password cannot be empty.", text_color="#e0a800")
+            return
+        if p1 != p2:
+            self.lbl_pwd_msg.configure(text="❌ Passwords do not match!", text_color="#dc3545")
+            return
+
+        self.active_account["pwd_hash"] = hashlib.sha256(p1.encode()).hexdigest()
+        save_config(self.accounts, autostart=bool(self.chk_autostart.get()))
+        self.lbl_pwd_msg.configure(text="✅ Password saved successfully! Returning...", text_color="#28a748")
+        self.update_idletasks()
+        self.after(500, lambda: self.show_editor(self.active_account))
+
+    def remove_existing_password(self):
+        if not self.active_account:
+            return
+        ans = messagebox.askyesno("Remove Password", "Are you sure you want to remove password protection for this account?", parent=self)
+        if ans:
+            self.active_account["pwd_hash"] = ""
+            save_config(self.accounts, autostart=bool(self.chk_autostart.get()))
+            self.lbl_pwd_msg.configure(text="🔓 Password protection removed! Returning...", text_color="#28a748")
+            self.update_idletasks()
+            self.after(500, lambda: self.show_editor(self.active_account))
+
+    def show_password_auth(self, acc):
+        self.frame_dashboard.pack_forget()
+        self.frame_editor.pack_forget()
+        self.frame_password_set.pack_forget()
+
+        self._pending_auth_acc = acc
+        self.lbl_auth_acc_name.configure(text=f"Account: '{acc.get('name', 'Account')}'")
+        self.entry_auth_pwd.delete(0, "end")
+        self.entry_auth_pwd.configure(show="*")
+        self.btn_eye_auth.configure(text="👁️")
+        self.is_auth_pwd_visible = False
+        self.lbl_auth_err.configure(text="")
+
+        self.frame_password_auth.pack(fill="both", expand=True)
+        self.entry_auth_pwd.focus_set()
+
+    def do_unlock_account(self):
+        if not self._pending_auth_acc:
+            self.show_dashboard()
+            return
+        entered = self.entry_auth_pwd.get()
+        if not entered:
+            self.lbl_auth_err.configure(text="Please enter the password.")
+            return
+
+        h = hashlib.sha256(entered.encode()).hexdigest()
+        expected = self._pending_auth_acc.get("pwd_hash", "")
+        if h == expected:
+            acc = self._pending_auth_acc
+            self._pending_auth_acc = None
+            self.show_editor(acc)
+        else:
+            self.lbl_auth_err.configure(text="❌ Incorrect password. Try again.")
+            self.entry_auth_pwd.delete(0, "end")
+
     def run_connection_test(self):
         token = self.entry_token.get().strip()
         chat_id = self.entry_chatid.get().strip()
@@ -4891,6 +5443,8 @@ class MasterMiniApp(ctk.CTk):
 
     def show_editor(self, acc=None):
         self.frame_dashboard.pack_forget()
+        self.frame_password_set.pack_forget()
+        self.frame_password_auth.pack_forget()
         self.active_account = acc
 
         self.is_token_visible = False
@@ -4921,34 +5475,15 @@ class MasterMiniApp(ctk.CTk):
     def login_to_account(self, acc):
         pwd_hash = acc.get("pwd_hash", "")
         if pwd_hash:
-            dialog = ctk.CTkInputDialog(text=f"Enter password for '{acc.get('name')}':", title="Account Authentication")
-            entered_pwd = dialog.get_input()
-            if not entered_pwd:
-                return
-            h = hashlib.sha256(entered_pwd.encode()).hexdigest()
-            if h != pwd_hash:
-                messagebox.showerror("Authentication Failed", "Incorrect account password.", parent=self)
-                return
-        self.show_editor(acc)
+            self.show_password_auth(acc)
+        else:
+            self.show_editor(acc)
 
     def set_account_password(self):
-        dialog = ctk.CTkInputDialog(
-            text="Enter a new password for this account (or leave empty to remove):",
-            title="Account Password"
-        )
-        pwd = dialog.get_input()
-        if pwd is not None:
-            if not self.active_account:
-                messagebox.showwarning("Notice", "Please save the account first before setting a password.", parent=self)
-                return
-            pwd_clean = pwd.strip()
-            if pwd_clean:
-                self.active_account["pwd_hash"] = hashlib.sha256(pwd_clean.encode()).hexdigest()
-                messagebox.showinfo("Security", "Password set successfully for this account!", parent=self)
-            else:
-                self.active_account["pwd_hash"] = ""
-                messagebox.showinfo("Security", "Password protection removed.", parent=self)
-            save_config(self.accounts, autostart=bool(self.chk_autostart.get()))
+        if not self.active_account:
+            messagebox.showwarning("Notice", "Please save the account first before setting a password.", parent=self)
+            return
+        self.show_password_setup()
 
     def save_account_changes(self):
         name = self.entry_acc_name.get().strip() or f"Account {len(self.accounts) + 1}"
@@ -5028,27 +5563,96 @@ class MasterMiniApp(ctk.CTk):
             ACTIVE_BOT_REGISTRY.pop(token, None)
 
     def paste_text_to_entry(self, entry_widget):
-        try:
-            txt = self.clipboard_get()
-            if txt:
-                entry_widget.delete(0, "end")
-                entry_widget.insert(0, txt.strip())
-        except Exception:
-            pass
+        txt = get_safe_clipboard_text()
+        if txt:
+            target = getattr(entry_widget, '_entry', entry_widget)
+            try:
+                target.delete(0, "end")
+                target.insert(0, txt.strip())
+            except Exception:
+                try:
+                    entry_widget.delete(0, "end")
+                    entry_widget.insert(0, txt.strip())
+                except Exception:
+                    pass
 
     def clear_entry(self, entry_widget):
-        entry_widget.delete(0, "end")
+        target = getattr(entry_widget, '_entry', entry_widget)
+        try:
+            target.delete(0, "end")
+        except Exception:
+            try:
+                entry_widget.delete(0, "end")
+            except Exception:
+                pass
 
     def attach_context_menu(self, widget):
-        menu = tk.Menu(widget, tearoff=0)
-        menu.add_command(label="Cut", command=lambda: widget.event_generate("<<Cut>>"))
-        menu.add_command(label="Copy", command=lambda: widget.event_generate("<<Copy>>"))
-        menu.add_command(label="Paste", command=lambda: widget.event_generate("<<Paste>>"))
-        menu.add_command(label="Select All", command=lambda: widget.select_range(0, 'end'))
+        inner = getattr(widget, '_entry', widget)
+        menu = tk.Menu(inner, tearoff=0, font=("Segoe UI", 9))
+
+        def _do_cut():
+            try:
+                if inner.selection_present():
+                    sel = inner.selection_get()
+                    set_safe_clipboard_text(sel)
+                    inner.delete("sel.first", "sel.last")
+            except Exception:
+                pass
+
+        def _do_copy():
+            try:
+                if inner.selection_present():
+                    sel = inner.selection_get()
+                    set_safe_clipboard_text(sel)
+            except Exception:
+                pass
+
+        def _do_paste():
+            txt = get_safe_clipboard_text()
+            if txt:
+                try:
+                    if inner.selection_present():
+                        inner.delete("sel.first", "sel.last")
+                    inner.insert("insert", txt)
+                except Exception:
+                    try:
+                        inner.insert(0, txt)
+                    except Exception:
+                        pass
+
+        def _do_select_all():
+            try:
+                inner.select_range(0, 'end')
+                inner.icursor('end')
+            except Exception:
+                pass
+
+        def _do_clear():
+            try:
+                inner.delete(0, 'end')
+            except Exception:
+                pass
+
+        menu.add_command(label="📋 Paste (لصق)", command=_do_paste)
+        menu.add_command(label="📄 Copy (نسخ)", command=_do_copy)
+        menu.add_command(label="✂️ Cut (قص)", command=_do_cut)
+        menu.add_separator()
+        menu.add_command(label="🔘 Select All (تحديد الكل)", command=_do_select_all)
+        menu.add_command(label="✖ Clear (مسح)", command=_do_clear)
 
         def _popup(event):
-            menu.tk_popup(event.x_root, event.y_root)
-        widget.bind("<Button-3>", _popup)
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            except Exception:
+                pass
+            finally:
+                menu.grab_release()
+
+        for w in (widget, inner):
+            try:
+                w.bind("<Button-3>", _popup, add="+")
+            except Exception:
+                pass
 
     def start_all_bots(self):
         global ACTIVE_BOT_REGISTRY
@@ -5056,38 +5660,31 @@ class MasterMiniApp(ctk.CTk):
         if not self.accounts:
             for tok in list(ACTIVE_BOT_REGISTRY.keys()):
                 self.stop_bot(tok)
-            self.lbl_dash_status.configure(text="Status: No accounts registered", text_color="gray")
+            self.lbl_dash_status.configure(text=f"Status: No accounts registered • {APP_VERSION}", text_color="gray")
             return
 
         token_groups = {}
-        valid_accounts_count = 0
-
         for acc in self.accounts:
             token = acc.get("token", "").strip()
             cid_str = str(acc.get("chat_id", "")).strip()
             name = acc.get("name", "User").strip()
-
             try:
                 cid = int(cid_str)
                 if token and cid:
                     token_groups.setdefault(token, {})[cid] = {"name": name, "acc_id": acc.get("id")}
-                    valid_accounts_count += 1
-            except ValueError:
+            except (ValueError, TypeError):
                 continue
 
-        current_active_tokens = list(ACTIVE_BOT_REGISTRY.keys())
-        for tok in current_active_tokens:
-            if tok not in token_groups:
-                self.stop_bot(tok)
+        current_tokens = set(token_groups.keys())
+        for existing_token in list(ACTIVE_BOT_REGISTRY.keys()):
+            if existing_token not in current_tokens:
+                self.stop_bot(existing_token)
 
-        if not token_groups:
-            self.lbl_dash_status.configure(text="Status: Incomplete credentials", text_color="#c9302c")
-            return
-
+        valid_accounts_count = 0
         for token, users in token_groups.items():
-            if token in ACTIVE_BOT_REGISTRY and ACTIVE_BOT_REGISTRY[token].get("thread") and ACTIVE_BOT_REGISTRY[token]["thread"].is_alive():
-                ACTIVE_BOT_REGISTRY[token]["user_map"].clear()
-                ACTIVE_BOT_REGISTRY[token]["user_map"].update(users)
+            valid_accounts_count += len(users)
+            if token in ACTIVE_BOT_REGISTRY:
+                ACTIVE_BOT_REGISTRY[token]["user_map"] = dict(users)
                 ACTIVE_BOT_REGISTRY[token]["stop_requested"] = False
             else:
                 user_dict_ref = dict(users)
@@ -5102,12 +5699,15 @@ class MasterMiniApp(ctk.CTk):
                 thread.start()
 
         self.lbl_dash_status.configure(
-            text=f"Active: {valid_accounts_count} of {len(self.accounts)} accounts connected ✅",
+            text=f"🟢 Online & Active: {valid_accounts_count} of {len(self.accounts)} accounts connected ✅ • {APP_VERSION}",
             text_color="#28a748"
         )
 
     def watchdog_supervisor(self):
         try:
+            # Check real internet connectivity
+            is_online = SMART_NETWORK_WATCHDOG.check_internet()
+
             token_groups = {}
             for acc in self.accounts:
                 token = acc.get("token", "").strip()
@@ -5120,6 +5720,7 @@ class MasterMiniApp(ctk.CTk):
                 except (ValueError, TypeError):
                     continue
 
+            active_count = 0
             for token, users in token_groups.items():
                 entry = ACTIVE_BOT_REGISTRY.get(token)
                 needs_restart = False
@@ -5129,8 +5730,10 @@ class MasterMiniApp(ctk.CTk):
                     t = entry.get("thread")
                     if not t or not t.is_alive():
                         needs_restart = True
+                    else:
+                        active_count += len(users)
 
-                if needs_restart:
+                if needs_restart and is_online:
                     user_dict_ref = dict(users)
                     thread = threading.Thread(target=start_bot_thread, args=(token, user_dict_ref), daemon=True)
                     ACTIVE_BOT_REGISTRY[token] = {
@@ -5141,10 +5744,32 @@ class MasterMiniApp(ctk.CTk):
                         "stop_requested": False
                     }
                     thread.start()
+                    active_count += len(users)
+
+            # Update live dashboard and tray status
+            if not getattr(self, "is_downloading_update", False):
+                if not self.accounts:
+                    self.lbl_dash_status.configure(text=f"Status: No accounts registered • {APP_VERSION}", text_color="gray")
+                    tray_info = f"{APP_NAME} - {APP_VERSION}"
+                elif not is_online:
+                    self.lbl_dash_status.configure(text=f"⚠️ Internet Disconnected • Reconnecting... • {APP_VERSION}", text_color="#e0a800")
+                    tray_info = f"{APP_NAME} {APP_VERSION} (Offline ⚠️)"
+                else:
+                    self.lbl_dash_status.configure(
+                        text=f"🟢 Online & Active: {active_count} of {len(self.accounts)} accounts connected ✅ • {APP_VERSION}",
+                        text_color="#28a748"
+                    )
+                    tray_info = f"{APP_NAME} {APP_VERSION} (Online ✅ • Active)"
+
+                if self.tray_icon:
+                    try:
+                        self.tray_icon.title = tray_info
+                    except Exception:
+                        pass
         except Exception:
             pass
         finally:
-            self.after(15000, self.watchdog_supervisor)
+            self.after(10000, self.watchdog_supervisor)
 
     def hide_to_tray(self):
         self.withdraw()
@@ -5154,15 +5779,15 @@ class MasterMiniApp(ctk.CTk):
 
     def _do_show_window(self):
         try:
-            if not self.frame_dashboard.winfo_ismapped() and not self.frame_editor.winfo_ismapped():
+            self.deiconify()
+            self.state("normal")
+            if not self.frame_dashboard.winfo_ismapped() and not self.frame_editor.winfo_ismapped() and not self.frame_password_set.winfo_ismapped() and not self.frame_password_auth.winfo_ismapped():
                 self.show_dashboard()
             elif self.frame_dashboard.winfo_ismapped():
                 self.refresh_accounts_dashboard()
-            self.deiconify()
-            self.state("normal")
             self.lift()
             self.attributes('-topmost', True)
-            self.after_idle(self.attributes, '-topmost', False)
+            self.after(100, lambda: self.attributes('-topmost', False))
             self.focus_force()
             self.update_idletasks()
         except Exception:
@@ -5321,11 +5946,10 @@ class MasterMiniApp(ctk.CTk):
             d = ImageDraw.Draw(img)
             d.rectangle([16, 16, 48, 48], fill=(40, 167, 69))
 
-        guard_active = SECURITY_GUARD_SETTINGS.get("enabled", True)
-        tray_title = f"{APP_NAME} - {APP_VERSION} [🛡️ Guard Active]" if guard_active else f"{APP_NAME} - {APP_VERSION}"
+        tray_title = f"{APP_NAME} - {APP_VERSION} (Online ✅ • Active)"
         menu = pystray.Menu(
             pystray.MenuItem("Open Dashboard", self.show_window, default=True),
-            pystray.MenuItem("Status: Active in Background ✅", None, enabled=False),
+            pystray.MenuItem("📁 Open Saved Files Folder", lambda icon, item: self.open_storage_folder()),
             pystray.MenuItem("🛡️ Security Guard: Active ✅", None, enabled=False),
             pystray.MenuItem("🔄 Check for Updates", lambda icon, item: self.after(0, self.trigger_update_check)),
             pystray.MenuItem("Exit Program", self.quit_app)
@@ -5342,7 +5966,10 @@ class MasterMiniApp(ctk.CTk):
         self.after(0, self._do_quit)
 
     def _do_quit(self):
-        self.destroy()
+        try:
+            self.destroy()
+        except Exception:
+            pass
         os._exit(0)
 
 if __name__ == "__main__":

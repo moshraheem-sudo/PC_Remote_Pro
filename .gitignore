@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.bak
+*.v40.bak
+
+# Build outputs
+build/
+dist/
+Output/
+*.exe
+*.zip
+0.26.0
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

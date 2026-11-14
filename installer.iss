@@ -2,7 +2,7 @@
 ; Installs the application to C:\Program Files\PC Remote Pro
 
 #define MyAppName "PC Remote Pro"
-#define MyAppVersion "4.0.0"
+#define MyAppVersion "4.1.0"
 #define MyAppPublisher "Mohammed Shaheed"
 #define MyAppExeName "PC_Remote_Pro.exe"
 #define MyAppAssocName MyAppName + " File"
@@ -19,9 +19,9 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 ; Output Configuration
-OutputDir=c:\Users\alarabi\Desktop\my_bot\Output
-OutputBaseFilename=PC_Remote_Pro_Setup_v4.0
-SetupIconFile=c:\Users\alarabi\Desktop\my_bot\PC_Remote_Pro.ico
+OutputDir=Output
+OutputBaseFilename=PC_Remote_Pro_Setup_v4.1
+SetupIconFile=PC_Remote_Pro.ico
 ; Compression Settings
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -33,7 +33,7 @@ PrivilegesRequired=admin
 PrivilegesRequiredOverridesAllowed=dialog
 CloseApplications=yes
 CloseApplicationsFilter=PC_Remote_Pro.exe
-VersionInfoVersion=3.9.0.0
+VersionInfoVersion=4.1.0.0
 VersionInfoCompany=Mohammed Shaheed
 VersionInfoDescription=PC Remote Pro - Universal Remote Control Hub
 VersionInfoCopyright=Copyright (C) 2026 Mohammed Shaheed
@@ -52,10 +52,10 @@ Type: files; Name: "{app}\PC_Remote_Pro.png"
 Type: files; Name: "{app}\PC_Remote_Pro.jpg"
 
 [Files]
-Source: "c:\Users\alarabi\Desktop\my_bot\dist\PC_Remote_Pro\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "c:\Users\alarabi\Desktop\my_bot\PC_Remote_Pro.ico"; DestDir: "{app}"; Flags: ignoreversion
-Source: "c:\Users\alarabi\Desktop\my_bot\PC_Remote_Pro.png"; DestDir: "{app}"; Flags: ignoreversion
-Source: "c:\Users\alarabi\Desktop\my_bot\PC_Remote_Pro.jpg"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\PC_Remote_Pro\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "PC_Remote_Pro.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "PC_Remote_Pro.png"; DestDir: "{app}"; Flags: ignoreversion
+Source: "PC_Remote_Pro.jpg"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\PC_Remote_Pro.ico"

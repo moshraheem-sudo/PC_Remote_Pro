@@ -1,17 +1,42 @@
 ================================================================================
-                           PC REMOTE PRO - VERSION 4.0
+                           PC REMOTE PRO - VERSION 4.1
        Universal Telegram PC Management & Smart Security Hub (Enterprise Edition)
                   Developed with Passion by Mohammed Shaheed
 ================================================================================
 
 [+] ABOUT THE APPLICATION:
 --------------------------------------------------------------------------------
-PC Remote Pro v4.0 is an autonomous, enterprise-grade Windows administration
+PC Remote Pro v4.1 is an autonomous, enterprise-grade Windows administration
 and surveillance application controlled entirely via Telegram. It offers complete
 remote control, smart self-healing network persistence, visual surveillance,
 and command execution from anywhere in the world through your smartphone.
 
-[+] WHAT'S NEW IN VERSION 4.0:
+[+] WHAT'S NEW IN VERSION 4.1:
+--------------------------------------------------------------------------------
+1. UNIVERSAL CLIPBOARD & KEYBOARD SHORTCUTS ENGINE (إصلاح وتطوير النسخ واللصق):
+   - Fully resolved paste and copy issues across all keyboard layouts (Arabic/English).
+   - Direct support for Ctrl+V, Ctrl+C, Ctrl+X, Ctrl+A with hardware Virtual Keycodes.
+   - Enhanced native Unicode clipboard reading (CF_UNICODETEXT) and Right-Click menu.
+   - Reliable one-click paste buttons for Token and Chat ID fields.
+
+2. IN-APP PASSWORD MANAGEMENT & AUTHENTICATION (شاشات كلمة السر المدمجة داخل التطبيق):
+   - Completely redesigned password setup and account unlock as seamless in-app screens
+     with dedicated Back buttons and automatic navigation upon saving.
+   - No detached popup dialogs.
+
+3. CUSTOM RECEIVED FILES STORAGE DIRECTORY (مجلد حفظ واستلام الملفات في الواجهة الرئيسية):
+   - Real-time directory display on the main dashboard showing where files are saved.
+   - "Change Folder" and "Open Folder" direct quick actions.
+   - Persistent directory configuration across reboots.
+
+4. REAL-TIME FILE RECEIPT NOTIFICATIONS (إشعارات استلام وحفظ الملفات):
+   - Instant Windows tray balloon notification and alert sound whenever a photo, audio,
+     or document is received via Telegram and saved to the PC.
+
+5. LIVE INTERNET & BOT CONNECTIVITY MONITORING (التحقق المباشر من الاتصال والبوت):
+   - Continuous real-time check of actual internet connection and Telegram bot threads.
+   - Dynamic dashboard status badges and tray tooltip near the clock.
+   - Ultra-reliable background tray operation.
 --------------------------------------------------------------------------------
 1. COLLAPSIBLE MOBILE MENU (حل مشكلة شاشة الهاتف وطي القائمة):
    - Added collapsible keyboard mode (is_persistent=False) to prevent the mobile
@@ -71,7 +96,7 @@ and command execution from anywhere in the world through your smartphone.
 [+] INSTALLATION & USAGE:
 --------------------------------------------------------------------------------
 Method 1 (Installer):
-  Run Output\PC_Remote_Pro_Setup_v4.0.exe and follow the wizard.
+  Run Output\PC_Remote_Pro_Setup_v4.1.exe and follow the wizard.
   Check "Run on Windows Startup" for 24/7 background availability.
 
 Method 2 (Source Code):
@@ -86,6 +111,6 @@ Configuration:
 
 ================================================================================
                     Developed by: Mohammed Shaheed
-                    Release Version: v4.0.0 (October 2026)
+                    Release Version: v4.1.0 (November 2026)
 ================================================================================
 
