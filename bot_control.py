@@ -478,9 +478,11 @@ async def send_large_file_split_telegram(bot, chat_id: int, file_path: str, auto
             try:
                 if progress_callback:
                     progress_callback(0.5, f"Retrying high-speed stream upload: {orig_name}...")
+                sess = get_telegram_session()
+                base_url = get_active_telegram_base_url()
                 with open(file_path, "rb") as fl:
-                    r = requests.post(
-                        f"https://api.telegram.org/bot{bot.token}/sendDocument",
+                    r = sess.post(
+                        f"{base_url}/bot{bot.token}/sendDocument",
                         data={"chat_id": chat_id, "caption": f"📁 File sent from PC:\n{orig_name} ({size_mb:.1f} MB)"},
                         files={"document": (orig_name, fl, "application/octet-stream")},
                         timeout=600
@@ -530,9 +532,11 @@ async def send_large_file_split_telegram(bot, chat_id: int, file_path: str, auto
                         connect_timeout=60.0
                     )
             except Exception:
+                sess = get_telegram_session()
+                base_url = get_active_telegram_base_url()
                 with open(zip_path, "rb") as fl:
-                    requests.post(
-                        f"https://api.telegram.org/bot{bot.token}/sendDocument",
+                    sess.post(
+                        f"{base_url}/bot{bot.token}/sendDocument",
                         data={"chat_id": chat_id, "caption": f"🗜️ Compressed: {zip_name} ({zip_mb:.1f} MB)"},
                         files={"document": (zip_name, fl, "application/octet-stream")},
                         timeout=600
@@ -592,9 +596,11 @@ async def send_large_file_split_telegram(bot, chat_id: int, file_path: str, auto
                             connect_timeout=60.0
                         )
                 except Exception:
+                    sess = get_telegram_session()
+                    base_url = get_active_telegram_base_url()
                     with open(part_path, "rb") as pf:
-                        requests.post(
-                            f"https://api.telegram.org/bot{bot.token}/sendDocument",
+                        sess.post(
+                            f"{base_url}/bot{bot.token}/sendDocument",
                             data={"chat_id": chat_id, "caption": f"📦 Part [{part_num}/{total_parts}] of: {orig_name}"},
                             files={"document": (part_name, pf, "application/octet-stream")},
                             timeout=600
@@ -640,9 +646,11 @@ async def send_large_file_split_telegram(bot, chat_id: int, file_path: str, auto
                     connect_timeout=60.0
                 )
         except Exception:
+            sess = get_telegram_session()
+            base_url = get_active_telegram_base_url()
             with open(bat_path, "rb") as bf:
-                requests.post(
-                    f"https://api.telegram.org/bot{bot.token}/sendDocument",
+                sess.post(
+                    f"{base_url}/bot{bot.token}/sendDocument",
                     data={"chat_id": chat_id, "caption": f"Recombine script for: {orig_name}"},
                     files={"document": (bat_name, bf, "application/octet-stream")},
                     timeout=600
@@ -677,36 +685,52 @@ def send_file_to_telegram_sync_bridge(token: str, chat_id: int, file_path: str, 
     return fut.result(timeout=1200)
 
 def send_text_to_telegram_sync_bridge(token: str, chat_id: int, text: str) -> tuple[bool, str]:
+    base_url = get_active_telegram_base_url()
     bot_entry = ACTIVE_BOT_REGISTRY.get(token)
-    if not bot_entry or not bot_entry.get("app") or not bot_entry.get("loop"):
-        try:
-            url = f"https://api.telegram.org/bot{token}/sendMessage"
-            resp = requests.post(url, json={"chat_id": chat_id, "text": f"💻 [PC Message]:\n{text}"}, timeout=10)
-            if resp.status_code == 200:
-                record_text_message(text, direction="sent", sender_name="PC User", chat_id=chat_id)
-                return True, "Message sent successfully."
-            else:
-                return False, f"Telegram API error ({resp.status_code}): {resp.text}"
-        except Exception as e:
-            return False, f"Error: {e}"
 
-    app_inst = bot_entry["app"]
-    bot_loop = bot_entry["loop"]
-    if not bot_loop or bot_loop.is_closed():
-        return False, "Bot event loop is stopped."
+    # 1. Attempt delivery via active bot event loop
+    if bot_entry and bot_entry.get("app") and bot_entry.get("loop"):
+        app_inst = bot_entry["app"]
+        bot_loop = bot_entry["loop"]
+        if bot_loop and not bot_loop.is_closed():
+            async def _send_msg():
+                await app_inst.bot.send_message(chat_id=chat_id, text=f"💻 **[Message from PC]:**\n{text}", parse_mode="Markdown")
+                return True, "Message delivered successfully."
 
-    async def _send_msg():
-        await app_inst.bot.send_message(chat_id=chat_id, text=f"💻 **[Message from PC]:**\n{text}", parse_mode="Markdown")
-        return True, "Message delivered successfully."
+            try:
+                fut = asyncio.run_coroutine_threadsafe(_send_msg(), bot_loop)
+                ok, res = fut.result(timeout=10)
+                if ok:
+                    record_text_message(text, direction="sent", sender_name="PC User", chat_id=chat_id)
+                    return True, res
+            except Exception:
+                pass  # Fall back to direct proxy session POST below
 
+    # 2. Direct HTTP POST via Configured Proxy Transport Layer
     try:
-        fut = asyncio.run_coroutine_threadsafe(_send_msg(), bot_loop)
-        ok, res = fut.result(timeout=15)
-        if ok:
+        sess = get_telegram_session()
+        url = f"{base_url}/bot{token}/sendMessage"
+        resp = sess.post(
+            url,
+            json={"chat_id": chat_id, "text": f"💻 [PC Message]:\n{text}"},
+            timeout=15
+        )
+        if resp.status_code == 200:
             record_text_message(text, direction="sent", sender_name="PC User", chat_id=chat_id)
-        return ok, res
+            return True, "Message delivered successfully."
+        else:
+            return False, f"Telegram API error ({resp.status_code}): {resp.text}"
     except Exception as e:
-        return False, str(e)
+        err_msg = str(e)
+        if not err_msg or "timed out" in err_msg.lower():
+            err_msg = (
+                "Connection timed out (Telegram API unreachable).\n\n"
+                "💡 If Telegram is blocked by your ISP:\n"
+                "1. Open '🛡️ Proxy' at the top of PC Remote Pro.\n"
+                "2. Choose SOCKS5 or HTTP or Reverse Proxy.\n"
+                "3. Enable proxy to route all messages securely."
+            )
+        return False, err_msg
 
 PATH_STORE = {}
 PATH_TO_ID = {}
@@ -1152,8 +1176,108 @@ PROXY_SETTINGS = {
     "server": "",
     "port": "",
     "secret": "",
+    "proto": "SOCKS5",
+    "reverse_url": "",
     "enabled": False
 }
+
+def get_active_proxy_url() -> str | None:
+    """Returns canonical proxy URL (e.g. socks5://host:port or http://host:port) if enabled."""
+    global PROXY_SETTINGS
+    if not PROXY_SETTINGS.get("enabled"):
+        return None
+    proto = str(PROXY_SETTINGS.get("proto", "SOCKS5")).upper()
+    server = str(PROXY_SETTINGS.get("server", "")).strip()
+    port = str(PROXY_SETTINGS.get("port", "")).strip()
+    secret = str(PROXY_SETTINGS.get("secret", "")).strip()
+
+    if proto in ("SOCKS5", "HTTP") and server and port:
+        scheme = "socks5" if proto == "SOCKS5" else "http"
+        if secret and ":" in secret:
+            return f"{scheme}://{secret}@{server}:{port}"
+        elif secret:
+            return f"{scheme}://user:{secret}@{server}:{port}"
+        else:
+            return f"{scheme}://{server}:{port}"
+    return None
+
+def get_active_telegram_base_url() -> str:
+    """Returns active Telegram API endpoint root (default https://api.telegram.org or custom mirror)."""
+    global PROXY_SETTINGS
+    if PROXY_SETTINGS.get("enabled"):
+        proto = str(PROXY_SETTINGS.get("proto", "")).upper()
+        if proto == "REVERSE":
+            rev = str(PROXY_SETTINGS.get("reverse_url", "")).strip().rstrip("/")
+            if rev:
+                if not rev.startswith("http://") and not rev.startswith("https://"):
+                    rev = "https://" + rev
+                return rev
+    return "https://api.telegram.org"
+
+def get_telegram_session() -> requests.Session:
+    """Returns a requests Session configured with the active proxy transport layer."""
+    sess = requests.Session()
+    sess.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PCRemotePro/4.2"
+    })
+    proxy_url = get_active_proxy_url()
+    if proxy_url:
+        sess.proxies = {
+            "http": proxy_url,
+            "https": proxy_url
+        }
+    return sess
+
+def apply_global_proxy_layer():
+    """Applies system environment variables and default url openers for proxy tunneling."""
+    global PROXY_SETTINGS
+    proxy_url = get_active_proxy_url()
+    if proxy_url:
+        os.environ["HTTP_PROXY"] = proxy_url
+        os.environ["HTTPS_PROXY"] = proxy_url
+        os.environ["ALL_PROXY"] = proxy_url
+        try:
+            proxy_handler = urllib.request.ProxyHandler({
+                "http": proxy_url,
+                "https": proxy_url
+            })
+            opener = urllib.request.build_opener(proxy_handler)
+            urllib.request.install_opener(opener)
+        except Exception:
+            pass
+    else:
+        for var in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]:
+            if var in os.environ:
+                os.environ.pop(var, None)
+        try:
+            urllib.request.install_opener(urllib.request.build_opener())
+        except Exception:
+            pass
+
+def detect_local_proxies() -> list[dict]:
+    """Scans localhost for running proxy clients (V2Ray, Clash, Shadowsocks, Psiphon, Tor, etc.)."""
+    probes = [
+        (10808, "SOCKS5", "V2Ray / Xray SOCKS5"),
+        (10809, "HTTP", "V2Ray / Xray HTTP"),
+        (7890, "SOCKS5", "Clash / Mihomo SOCKS5"),
+        (7891, "HTTP", "Clash HTTP"),
+        (1080, "SOCKS5", "Shadowsocks SOCKS5"),
+        (2080, "SOCKS5", "Psiphon SOCKS5"),
+        (8080, "HTTP", "Local HTTP Proxy"),
+        (9050, "SOCKS5", "Tor SOCKS5"),
+        (8888, "HTTP", "Fiddler / Charles HTTP"),
+    ]
+    detected = []
+    for port, proto, name in probes:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.2)
+            s.connect(("127.0.0.1", port))
+            s.close()
+            detected.append({"host": "127.0.0.1", "port": str(port), "proto": proto, "name": name})
+        except Exception:
+            pass
+    return detected
 
 def test_proxy_ping(host: str, port: int, timeout: float = 3.5) -> tuple[bool, float, str]:
     """Tests TCP socket reachability to MTProto proxy host and port, returning (success, latency_ms, error_msg)."""
@@ -1168,20 +1292,28 @@ def test_proxy_ping(host: str, port: int, timeout: float = 3.5) -> tuple[bool, f
     except Exception as e:
         return False, 0.0, str(e)
 
-def parse_telegram_proxy_link(url_str: str) -> tuple[str, str, str]:
-    """Parses tg://proxy? or https://t.me/proxy? link into (server, port, secret)."""
+def parse_telegram_proxy_link(url_str: str) -> tuple[str, str, str, str]:
+    """Parses proxy link or string into (proto, server, port, secret)."""
     from urllib.parse import urlparse, parse_qs
     url_str = url_str.strip()
-    if url_str.startswith("tg://proxy?"):
-        url_str = url_str.replace("tg://proxy?", "https://t.me/proxy?")
-    elif url_str.startswith("tg://"):
-        url_str = "https://t.me/" + url_str[5:]
-    parsed = urlparse(url_str)
-    qs = parse_qs(parsed.query)
-    server = qs.get("server", [""])[0]
-    port = qs.get("port", [""])[0]
-    secret = qs.get("secret", [""])[0]
-    return server, port, secret
+    if url_str.startswith("socks5://"):
+        parsed = urlparse(url_str)
+        return "SOCKS5", parsed.hostname or "", str(parsed.port or ""), parsed.password or ""
+    elif url_str.startswith("http://"):
+        parsed = urlparse(url_str)
+        return "HTTP", parsed.hostname or "", str(parsed.port or ""), parsed.password or ""
+    elif url_str.startswith("tg://proxy?") or url_str.startswith("https://t.me/proxy?"):
+        if url_str.startswith("tg://proxy?"):
+            url_str = url_str.replace("tg://proxy?", "https://t.me/proxy?")
+        parsed = urlparse(url_str)
+        qs = parse_qs(parsed.query)
+        server = qs.get("server", [""])[0]
+        port = qs.get("port", [""])[0]
+        secret = qs.get("secret", [""])[0]
+        return "MTPROTO", server, port, secret
+    elif url_str.startswith("https://") and ("workers.dev" in url_str or "proxy" in url_str or "mirror" in url_str):
+        return "REVERSE", "", "", url_str
+    return "SOCKS5", "", "", ""
 
 def open_telegram_proxy(server: str, port: str, secret: str):
     """Invokes Telegram Desktop or browser with the MTProto proxy configuration."""
@@ -1206,6 +1338,7 @@ def save_config(accounts_list, autostart=True, security_guard=None, download_fol
         DOWNLOADS_FOLDER = download_folder
     if proxy is not None:
         PROXY_SETTINGS = proxy
+    apply_global_proxy_layer()
     data = {
         "accounts": accounts_list,
         "autostart": autostart,
@@ -1268,6 +1401,7 @@ def load_config():
                             set_download_folder(data["download_folder"])
                         if "proxy" in data and isinstance(data["proxy"], dict):
                             PROXY_SETTINGS.update(data["proxy"])
+                        apply_global_proxy_layer()
                         return data
             except Exception:
                 continue
@@ -1282,10 +1416,12 @@ def load_config():
                 if "security_guard" in data and isinstance(data["security_guard"], dict):
                     SECURITY_GUARD_SETTINGS.update(data["security_guard"])
                 save_config(data.get("accounts", []), autostart=data.get("autostart", True))
+                apply_global_proxy_layer()
                 return data
         except Exception:
             pass
 
+    apply_global_proxy_layer()
     return {"accounts": [], "autostart": True}
 
 # ----------------- Ultra-HD Multi-Monitor Screenshot Capture -----------------
@@ -2837,20 +2973,26 @@ def test_telegram_connection(token: str, chat_id_str: str) -> tuple[bool, str]:
     if not token:
         return False, "❌ Bot token field is empty! Please paste your token from @BotFather."
 
+    sess = get_telegram_session()
+    base_url = get_active_telegram_base_url()
+
     try:
-        url_getme = f"https://api.telegram.org/bot{token}/getMe"
-        req = urllib.request.Request(url_getme, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode())
-            if not data.get("ok"):
-                return False, "❌ Bot token is invalid or revoked by BotFather!"
-            bot_username = data.get("result", {}).get("username", "Bot")
-    except urllib.error.HTTPError as e:
-        if e.code in [401, 404]:
+        url_getme = f"{base_url}/bot{token}/getMe"
+        resp = sess.get(url_getme, timeout=10)
+        data = resp.json()
+        if not data.get("ok"):
+            return False, "❌ Bot token is invalid or revoked by BotFather!"
+        bot_username = data.get("result", {}).get("username", "Bot")
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code if e.response else 0
+        if status_code in [401, 404]:
             return False, "❌ Bot token is unauthorized! Verify the token from @BotFather."
-        return False, f"❌ Telegram HTTP error ({e.code}): {e.reason}"
+        return False, f"❌ Telegram HTTP error ({status_code}): {e}"
     except Exception as e:
-        return False, f"❌ Failed to reach Telegram API. Verify internet connection: {e}"
+        err_s = str(e)
+        if "timed out" in err_s.lower() or not err_s:
+            err_s = "Connection timed out. If Telegram is blocked, please configure a working SOCKS5/HTTP proxy in 🛡️ Proxy settings."
+        return False, f"❌ Failed to reach Telegram API: {err_s}"
 
     chat_id = None
     if chat_id_str:
@@ -2868,7 +3010,7 @@ def test_telegram_connection(token: str, chat_id_str: str) -> tuple[bool, str]:
                 f"🤖 Bot: @{bot_username}\n\n"
                 f"Control keyboard registered below. Tap any button to interact with your PC:"
             )
-            send_data = json.dumps({
+            payload = {
                 "chat_id": chat_id,
                 "text": test_msg,
                 "parse_mode": "Markdown",
@@ -2887,26 +3029,20 @@ def test_telegram_connection(token: str, chat_id_str: str) -> tuple[bool, str]:
                     "is_persistent": True,
                     "one_time_keyboard": False
                 }
-            }).encode('utf-8')
-
-            url_send = f"https://api.telegram.org/bot{token}/sendMessage"
-            req_send = urllib.request.Request(
-                url_send,
-                data=send_data,
-                headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
-            )
-            with urllib.request.urlopen(req_send, timeout=8) as resp:
-                data_send = json.loads(resp.read().decode())
-                if data_send.get("ok"):
-                    return True, f"✅ Connection verified 100%!\nLinked with @{bot_username} and test message delivered to your Telegram."
-        except urllib.error.HTTPError as e:
-            if e.code in [400, 403]:
+            }
+            url_send = f"{base_url}/bot{token}/sendMessage"
+            resp_send = sess.post(url_send, json=payload, timeout=12)
+            data_send = resp_send.json()
+            if data_send.get("ok"):
+                return True, f"✅ Connection verified 100%!\nLinked with @{bot_username} and test message delivered to your Telegram."
+            elif resp_send.status_code in [400, 403]:
                 return True, (
                     f"✅ Bot Token & Connection Verified Successfully (@{bot_username})!\n\n"
-                    f"💡 Application is fully connected to Telegram servers and active in the background.\n"
+                    f"💡 Application is fully connected to Telegram servers through the proxy layer.\n"
                     f"📌 Note: To start controlling your PC from your phone, open Telegram, search for @{bot_username}, and tap START."
                 )
-            return False, f"❌ Telegram HTTP error ({e.code}): {e.reason}"
+            else:
+                return False, f"Telegram API error ({resp_send.status_code}): {data_send.get('description', '')}"
         except Exception as e:
             return True, f"✅ Token is valid and linked with @{bot_username}.\nApplication is active in the background."
 
@@ -5050,13 +5186,29 @@ def start_bot_thread(token: str, user_dict_ref: dict):
         if entry and entry.get("stop_requested"):
             break
 
-        # Check internet before polling attempt
+        # Check network connectivity before polling attempt
+        proxy_url = get_active_proxy_url()
+        base_url = get_active_telegram_base_url()
+        check_host = "api.telegram.org"
+        check_port = 443
+
+        if proxy_url:
+            from urllib.parse import urlparse
+            p_parsed = urlparse(proxy_url)
+            check_host = p_parsed.hostname or "127.0.0.1"
+            check_port = p_parsed.port or 10808
+        elif base_url != "https://api.telegram.org":
+            from urllib.parse import urlparse
+            p_parsed = urlparse(base_url)
+            check_host = p_parsed.hostname or "api.telegram.org"
+            check_port = p_parsed.port or (443 if p_parsed.scheme == "https" else 80)
+
         for _ in range(15):
             entry = ACTIVE_BOT_REGISTRY.get(token)
             if entry and entry.get("stop_requested"):
                 return
             try:
-                s = socket.create_connection(("api.telegram.org", 443), timeout=3)
+                s = socket.create_connection((check_host, check_port), timeout=3)
                 s.close()
                 break
             except OSError:
@@ -5070,6 +5222,7 @@ def start_bot_thread(token: str, user_dict_ref: dict):
 
         try:
             req = HTTPXRequest(
+                proxy=proxy_url if proxy_url else None,
                 connection_pool_size=16,
                 connect_timeout=30.0,
                 read_timeout=120.0,
@@ -5077,13 +5230,15 @@ def start_bot_thread(token: str, user_dict_ref: dict):
                 pool_timeout=30.0,
                 socket_options=[(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
             )
-            app = (
+            builder = (
                 Application.builder()
                 .token(token)
                 .request(req)
                 .post_init(post_init)
-                .build()
             )
+            if base_url != "https://api.telegram.org":
+                builder = builder.base_url(f"{base_url.rstrip('/')}/bot")
+            app = builder.build()
             register_all_handlers(app)
 
             if token in ACTIVE_BOT_REGISTRY:
@@ -7188,7 +7343,7 @@ class MasterMiniApp(ctk.CTk):
         )
         btn_bottom_back.pack(fill="x", padx=10, pady=(4, 12))
 
-    # ----------------- Screen 7: MTProto Proxy Manager (Proxy 🛡️) -----------------
+    # ----------------- Screen 7: MTProto & SOCKS5 Proxy Manager (Proxy 🛡️) -----------------
     def setup_proxy_ui(self):
         # Header toolbar
         self.header_proxy = ctk.CTkFrame(self.frame_proxy, fg_color="transparent")
@@ -7213,7 +7368,7 @@ class MasterMiniApp(ctk.CTk):
 
         lbl_title = ctk.CTkLabel(
             self.header_proxy,
-            text="MTProto Proxy Manager",
+            text="Proxy & Network Shield",
             font=ctk.CTkFont(size=13, weight="bold")
         )
         lbl_title.pack(side="left", padx=4)
@@ -7253,6 +7408,42 @@ class MasterMiniApp(ctk.CTk):
         )
         self.lbl_proxy_ping_detail.pack(anchor="w", padx=10, pady=(0, 6))
 
+        # --- Card 0: Mode Selection & Quick Local Detection ---
+        card_mode = ctk.CTkFrame(scroll_proxy, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
+        card_mode.pack(fill="x", padx=4, pady=(0, 6))
+
+        lbl_mode_title = ctk.CTkLabel(
+            card_mode,
+            text="🛡️ Proxy Protocol / نوع الاتصال:",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#00bcd4"
+        )
+        lbl_mode_title.pack(anchor="w", padx=10, pady=(6, 2))
+
+        row_mode = ctk.CTkFrame(card_mode, fg_color="transparent")
+        row_mode.pack(fill="x", padx=10, pady=(0, 6))
+
+        self.combo_proxy_proto = ctk.CTkOptionMenu(
+            row_mode,
+            values=["SOCKS5 (Bot & PC)", "HTTP Proxy", "MTProto (TG Desktop)", "Reverse Proxy Mirror"],
+            height=28,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self.on_proxy_proto_changed
+        )
+        self.combo_proxy_proto.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        btn_auto_detect = ctk.CTkButton(
+            row_mode,
+            text="🔍 Auto-Detect",
+            width=85,
+            height=28,
+            fg_color="#17a2b8",
+            hover_color="#138496",
+            font=ctk.CTkFont(size=9, weight="bold"),
+            command=self.auto_detect_local_proxy_gui
+        )
+        btn_auto_detect.pack(side="right")
+
         # --- Card 1: Quick Auto-Fill from Link ---
         card_import = ctk.CTkFrame(scroll_proxy, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
         card_import.pack(fill="x", padx=4, pady=(0, 6))
@@ -7270,7 +7461,7 @@ class MasterMiniApp(ctk.CTk):
 
         self.entry_proxy_link = ctk.CTkEntry(
             row_import,
-            placeholder_text="tg://proxy?server=...&port=...&secret=...",
+            placeholder_text="tg://proxy?server=... or socks5://... or http://...",
             font=ctk.CTkFont(size=10),
             height=28
         )
@@ -7289,23 +7480,23 @@ class MasterMiniApp(ctk.CTk):
         btn_parse_link.pack(side="right")
 
         # --- Card 2: Proxy Server Settings (Host, Port, Secret) ---
-        card_fields = ctk.CTkFrame(scroll_proxy, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
-        card_fields.pack(fill="x", padx=4, pady=(0, 6))
+        self.card_fields = ctk.CTkFrame(scroll_proxy, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
+        self.card_fields.pack(fill="x", padx=4, pady=(0, 6))
 
         # 1. Server / Host (الخادم)
-        lbl_server = ctk.CTkLabel(
-            card_fields,
+        self.lbl_proxy_server = ctk.CTkLabel(
+            self.card_fields,
             text="Server / Host (الخادم):",
             font=ctk.CTkFont(size=10, weight="bold")
         )
-        lbl_server.pack(anchor="w", padx=10, pady=(6, 2))
+        self.lbl_proxy_server.pack(anchor="w", padx=10, pady=(6, 2))
 
-        row_server = ctk.CTkFrame(card_fields, fg_color="transparent")
+        row_server = ctk.CTkFrame(self.card_fields, fg_color="transparent")
         row_server.pack(fill="x", padx=10, pady=(0, 4))
 
         self.entry_proxy_server = ctk.CTkEntry(
             row_server,
-            placeholder_text="e.g. 149.154.175.50 or proxy.domain.com",
+            placeholder_text="e.g. 127.0.0.1 or 149.154.175.50 or proxy.com",
             font=ctk.CTkFont(size=10),
             height=28
         )
@@ -7334,19 +7525,19 @@ class MasterMiniApp(ctk.CTk):
         btn_clear_server.pack(side="left")
 
         # 2. Port (المنفذ)
-        lbl_port = ctk.CTkLabel(
-            card_fields,
+        self.lbl_proxy_port = ctk.CTkLabel(
+            self.card_fields,
             text="Port (المنفذ):",
             font=ctk.CTkFont(size=10, weight="bold")
         )
-        lbl_port.pack(anchor="w", padx=10, pady=(4, 2))
+        self.lbl_proxy_port.pack(anchor="w", padx=10, pady=(4, 2))
 
-        row_port = ctk.CTkFrame(card_fields, fg_color="transparent")
+        row_port = ctk.CTkFrame(self.card_fields, fg_color="transparent")
         row_port.pack(fill="x", padx=10, pady=(0, 4))
 
         self.entry_proxy_port = ctk.CTkEntry(
             row_port,
-            placeholder_text="e.g. 443 or 8443",
+            placeholder_text="e.g. 10808 (V2Ray) or 7890 (Clash) or 443",
             font=ctk.CTkFont(size=10),
             height=28
         )
@@ -7374,21 +7565,21 @@ class MasterMiniApp(ctk.CTk):
         )
         btn_clear_port.pack(side="left")
 
-        # 3. Secret / Key (المفتاح)
-        lbl_secret = ctk.CTkLabel(
-            card_fields,
-            text="Secret / Key (المفتاح):",
+        # 3. Secret / Key / Password (المفتاح أو كلمة المرور)
+        self.lbl_proxy_secret = ctk.CTkLabel(
+            self.card_fields,
+            text="Secret / Password (المفتاح أو كلمة المرور):",
             font=ctk.CTkFont(size=10, weight="bold")
         )
-        lbl_secret.pack(anchor="w", padx=10, pady=(4, 2))
+        self.lbl_proxy_secret.pack(anchor="w", padx=10, pady=(4, 2))
 
-        row_secret = ctk.CTkFrame(card_fields, fg_color="transparent")
-        row_secret.pack(fill="x", padx=10, pady=(0, 6))
+        row_secret = ctk.CTkFrame(self.card_fields, fg_color="transparent")
+        row_secret.pack(fill="x", padx=10, pady=(0, 4))
 
         self.is_proxy_secret_visible = False
         self.entry_proxy_secret = ctk.CTkEntry(
             row_secret,
-            placeholder_text="e.g. ee... or 7g... or dd...",
+            placeholder_text="Optional password / secret key",
             font=ctk.CTkFont(size=10),
             height=28,
             show="*"
@@ -7428,13 +7619,53 @@ class MasterMiniApp(ctk.CTk):
         )
         btn_clear_secret.pack(side="left")
 
+        # 4. Reverse Proxy Mirror URL (for Reverse Proxy mode)
+        self.lbl_proxy_reverse = ctk.CTkLabel(
+            self.card_fields,
+            text="🌐 Reverse Proxy URL (رابط الخادم البديل المباشر):",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#28a748"
+        )
+
+        self.row_reverse = ctk.CTkFrame(self.card_fields, fg_color="transparent")
+
+        self.entry_proxy_reverse = ctk.CTkEntry(
+            self.row_reverse,
+            placeholder_text="https://your-mirror.workers.dev",
+            font=ctk.CTkFont(size=10),
+            height=28
+        )
+        self.entry_proxy_reverse.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        btn_paste_rev = ctk.CTkButton(
+            self.row_reverse,
+            text="📋",
+            width=28,
+            height=28,
+            fg_color="#333333",
+            hover_color="#444444",
+            command=lambda: self._paste_into(self.entry_proxy_reverse)
+        )
+        btn_paste_rev.pack(side="left", padx=(0, 2))
+
+        btn_clear_rev = ctk.CTkButton(
+            self.row_reverse,
+            text="✖",
+            width=28,
+            height=28,
+            fg_color="#dc3545",
+            hover_color="#c82333",
+            command=lambda: self.entry_proxy_reverse.delete(0, "end")
+        )
+        btn_clear_rev.pack(side="left")
+
         # --- Card 3: Action Buttons (Test, Save, Connect in Telegram) ---
         card_actions = ctk.CTkFrame(scroll_proxy, fg_color="transparent")
         card_actions.pack(fill="x", padx=4, pady=(2, 6))
 
         self.btn_test_proxy = ctk.CTkButton(
             card_actions,
-            text="🧪 Test Connection (فحص الاتصال)",
+            text="🧪 Test Connection (فحص الاتصال والطبقة المحمية)",
             height=30,
             fg_color="#f39c12",
             hover_color="#d68910",
@@ -7446,7 +7677,7 @@ class MasterMiniApp(ctk.CTk):
 
         self.btn_save_proxy = ctk.CTkButton(
             card_actions,
-            text="💾 Save Proxy Settings (حفظ الإعدادات)",
+            text="💾 Save & Activate Proxy Layer (حفظ وتفعيل الطبقة للتطبيق بالكامل)",
             height=30,
             fg_color="#28a748",
             hover_color="#218838",
@@ -7456,10 +7687,22 @@ class MasterMiniApp(ctk.CTk):
         )
         self.btn_save_proxy.pack(fill="x", pady=(0, 4))
 
+        self.btn_disable_proxy = ctk.CTkButton(
+            card_actions,
+            text="🔌 Disable Proxy / Direct Connection (تعطيل البروكسي والعودة للاتصال المباشر)",
+            height=28,
+            fg_color="#444444",
+            hover_color="#555555",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=9, weight="bold"),
+            command=self.disable_proxy_settings_gui
+        )
+        self.btn_disable_proxy.pack(fill="x", pady=(0, 4))
+
         self.btn_open_tg_proxy = ctk.CTkButton(
             card_actions,
-            text="🚀 Connect Telegram via this Proxy (الاتصال في تيليجرام)",
-            height=32,
+            text="🚀 Connect Telegram Desktop via this Proxy (الاتصال في تيليجرام ديسكتوب)",
+            height=30,
             fg_color="#0088cc",
             hover_color="#006699",
             text_color="#FFFFFF",
@@ -7473,7 +7716,8 @@ class MasterMiniApp(ctk.CTk):
             card_actions,
             text="",
             font=ctk.CTkFont(size=10, weight="bold"),
-            text_color="#28a748"
+            text_color="#28a748",
+            wraplength=340
         )
         self.lbl_proxy_msg.pack(fill="x", pady=(0, 4))
 
@@ -7491,7 +7735,7 @@ class MasterMiniApp(ctk.CTk):
 
         lbl_ch_desc = ctk.CTkLabel(
             card_channel,
-            text="Get updated high-speed MTProto proxies daily directly from the official channel @ProxyMTProto.\n"
+            text="Get updated high-speed MTProto proxies daily directly from @ProxyMTProto:\n"
                  "احصل على أحدث سيرفرات البروكسي السريعة يومياً مجاناً:",
             font=ctk.CTkFont(size=9),
             justify="left",
@@ -7541,6 +7785,30 @@ class MasterMiniApp(ctk.CTk):
         )
         btn_bottom_back.pack(fill="x", padx=10, pady=(4, 12))
 
+    def on_proxy_proto_changed(self, choice=None):
+        proto = self.combo_proxy_proto.get()
+        if "Reverse Proxy" in proto:
+            self.lbl_proxy_reverse.pack(anchor="w", padx=10, pady=(6, 2))
+            self.row_reverse.pack(fill="x", padx=10, pady=(0, 6))
+        else:
+            self.lbl_proxy_reverse.pack_forget()
+            self.row_reverse.pack_forget()
+
+    def auto_detect_local_proxy_gui(self):
+        detected = detect_local_proxies()
+        if detected:
+            first = detected[0]
+            self.combo_proxy_proto.set("SOCKS5 (Bot & PC)" if first["proto"] == "SOCKS5" else "HTTP Proxy")
+            self.entry_proxy_server.delete(0, "end")
+            self.entry_proxy_server.insert(0, first["host"])
+            self.entry_proxy_port.delete(0, "end")
+            self.entry_proxy_port.insert(0, str(first["port"]))
+            self.on_proxy_proto_changed()
+            self._show_proxy_msg(f"✅ Auto-detected active {first['name']} on {first['host']}:{first['port']}!", "#28a748")
+            self.test_proxy_connection_gui()
+        else:
+            self._show_proxy_msg("ℹ️ No active local proxy detected on standard ports (10808, 7890, 8080). Please enter host and port manually.", "#e0a800")
+
     def _paste_into(self, entry_widget):
         try:
             val = self.clipboard_get().strip()
@@ -7565,52 +7833,151 @@ class MasterMiniApp(ctk.CTk):
         if not raw_link:
             self._show_proxy_msg("⚠️ Please enter or copy a proxy link first.", "#e0a800")
             return
-        server, port, secret = parse_telegram_proxy_link(raw_link)
-        if server and port:
+        proto, server, port, secret = parse_telegram_proxy_link(raw_link)
+        if proto == "MTPROTO":
+            self.combo_proxy_proto.set("MTProto (TG Desktop)")
+        elif proto == "HTTP":
+            self.combo_proxy_proto.set("HTTP Proxy")
+        elif proto == "REVERSE":
+            self.combo_proxy_proto.set("Reverse Proxy Mirror")
+            self.entry_proxy_reverse.delete(0, "end")
+            self.entry_proxy_reverse.insert(0, secret)
+        else:
+            self.combo_proxy_proto.set("SOCKS5 (Bot & PC)")
+
+        self.on_proxy_proto_changed()
+        if server:
             self.entry_proxy_server.delete(0, "end")
             self.entry_proxy_server.insert(0, server)
+        if port:
             self.entry_proxy_port.delete(0, "end")
             self.entry_proxy_port.insert(0, str(port))
-            if secret:
-                self.entry_proxy_secret.delete(0, "end")
-                self.entry_proxy_secret.insert(0, secret)
-            self._show_proxy_msg("✅ Proxy parameters auto-filled successfully!", "#28a748")
-            self.test_proxy_connection_gui()
-        else:
-            self._show_proxy_msg("❌ Could not parse proxy link. Ensure it starts with tg://proxy? or https://t.me/proxy?", "#dc3545")
+        if secret and proto != "REVERSE":
+            self.entry_proxy_secret.delete(0, "end")
+            self.entry_proxy_secret.insert(0, secret)
+
+        self._show_proxy_msg("✅ Proxy parameters auto-filled successfully!", "#28a748")
+        self.test_proxy_connection_gui()
 
     def load_proxy_settings_into_ui(self):
         global PROXY_SETTINGS
+        proto = PROXY_SETTINGS.get("proto", "SOCKS5").upper()
+        if proto == "MTPROTO":
+            self.combo_proxy_proto.set("MTProto (TG Desktop)")
+        elif proto == "HTTP":
+            self.combo_proxy_proto.set("HTTP Proxy")
+        elif proto == "REVERSE":
+            self.combo_proxy_proto.set("Reverse Proxy Mirror")
+        else:
+            self.combo_proxy_proto.set("SOCKS5 (Bot & PC)")
+
         self.entry_proxy_server.delete(0, "end")
         self.entry_proxy_server.insert(0, PROXY_SETTINGS.get("server", ""))
         self.entry_proxy_port.delete(0, "end")
         self.entry_proxy_port.insert(0, str(PROXY_SETTINGS.get("port", "")))
         self.entry_proxy_secret.delete(0, "end")
         self.entry_proxy_secret.insert(0, PROXY_SETTINGS.get("secret", ""))
+        self.entry_proxy_reverse.delete(0, "end")
+        self.entry_proxy_reverse.insert(0, PROXY_SETTINGS.get("reverse_url", ""))
+        self.on_proxy_proto_changed()
         self.lbl_proxy_msg.configure(text="")
-        if PROXY_SETTINGS.get("server") and PROXY_SETTINGS.get("port"):
+
+        if PROXY_SETTINGS.get("enabled"):
+            self.lbl_proxy_live_status.configure(text="● Proxy Active (مفعل)", text_color="#28a748")
+            self.lbl_proxy_ping_detail.configure(text="Traffic is securely routed through the configured proxy layer.", text_color="#28a748")
             self.test_proxy_connection_gui()
         else:
-            self.lbl_proxy_live_status.configure(text="● No Proxy Configured", text_color="#aaaaaa")
-            self.lbl_proxy_ping_detail.configure(text="Enter host and port or paste link above.", text_color="#888888")
+            self.lbl_proxy_live_status.configure(text="● Direct / No Proxy", text_color="#aaaaaa")
+            self.lbl_proxy_ping_detail.configure(text="Operating in direct connection mode.", text_color="#888888")
 
     def save_proxy_settings_gui(self):
         global PROXY_SETTINGS
+        choice = self.combo_proxy_proto.get()
+        if "MTProto" in choice:
+            proto = "MTPROTO"
+        elif "HTTP" in choice:
+            proto = "HTTP"
+        elif "Reverse" in choice:
+            proto = "REVERSE"
+        else:
+            proto = "SOCKS5"
+
         server = self.entry_proxy_server.get().strip()
         port = self.entry_proxy_port.get().strip()
         secret = self.entry_proxy_secret.get().strip()
+        rev_url = self.entry_proxy_reverse.get().strip()
 
+        PROXY_SETTINGS["proto"] = proto
         PROXY_SETTINGS["server"] = server
         PROXY_SETTINGS["port"] = port
         PROXY_SETTINGS["secret"] = secret
-        PROXY_SETTINGS["enabled"] = bool(server and port)
+        PROXY_SETTINGS["reverse_url"] = rev_url
+        PROXY_SETTINGS["enabled"] = bool((server and port) or (proto == "REVERSE" and rev_url))
 
         save_config(self.accounts, autostart=self.config.get("autostart", True), proxy=PROXY_SETTINGS)
-        self._show_proxy_msg("✅ Proxy settings saved successfully!", "#28a748")
+        apply_global_proxy_layer()
+
+        # Seamlessly reload active bots with the newly established proxy layer
+        for tok in list(ACTIVE_BOT_REGISTRY.keys()):
+            self.stop_bot(tok)
+        self.after(600, self.start_all_bots)
+
+        self._show_proxy_msg("✅ Proxy layer saved & applied! Active bots reconnected through the proxy.", "#28a748")
+        self.lbl_proxy_live_status.configure(text="● Proxy Active (مفعل)", text_color="#28a748")
+        self.test_proxy_connection_gui()
+
+    def disable_proxy_settings_gui(self):
+        global PROXY_SETTINGS
+        PROXY_SETTINGS["enabled"] = False
+        save_config(self.accounts, autostart=self.config.get("autostart", True), proxy=PROXY_SETTINGS)
+        apply_global_proxy_layer()
+
+        for tok in list(ACTIVE_BOT_REGISTRY.keys()):
+            self.stop_bot(tok)
+        self.after(600, self.start_all_bots)
+
+        self._show_proxy_msg("🔌 Proxy disabled. Switched back to direct connection mode.", "#17a2b8")
+        self.lbl_proxy_live_status.configure(text="● Direct / No Proxy", text_color="#aaaaaa")
+        self.lbl_proxy_ping_detail.configure(text="Operating in direct connection mode.", text_color="#888888")
 
     def test_proxy_connection_gui(self):
+        choice = self.combo_proxy_proto.get()
         server = self.entry_proxy_server.get().strip()
         port_str = self.entry_proxy_port.get().strip()
+        rev_url = self.entry_proxy_reverse.get().strip()
+
+        if "Reverse" in choice:
+            if not rev_url:
+                self._show_proxy_msg("⚠️ Please enter Reverse Proxy URL first.", "#e0a800")
+                return
+            self.btn_test_proxy.configure(state="disabled", text="⏳ Testing mirror...")
+            self.lbl_proxy_live_status.configure(text="● Testing Mirror...", text_color="#f39c12")
+
+            def worker_rev():
+                start = time.time()
+                try:
+                    r = requests.get(f"{rev_url.rstrip('/')}/bot", timeout=5)
+                    lat = round((time.time() - start) * 1000, 1)
+                    ok = (r.status_code in [200, 400, 404])
+                    def ui_rev():
+                        self.btn_test_proxy.configure(state="normal", text="🧪 Test Connection (فحص الاتصال والطبقة المحمية)")
+                        if ok:
+                            self.lbl_proxy_live_status.configure(text="● Connected (متصل)", text_color="#28a748")
+                            self.lbl_proxy_ping_detail.configure(text=f"⚡ Mirror is active! Latency: {lat} ms", text_color="#28a748")
+                            self._show_proxy_msg(f"✅ Reverse Proxy reached! Ping: {lat} ms", "#28a748")
+                        else:
+                            self.lbl_proxy_live_status.configure(text="● Disconnected (غير متصل)", text_color="#dc3545")
+                            self.lbl_proxy_ping_detail.configure(text=f"❌ HTTP Error ({r.status_code})", text_color="#dc3545")
+                    self.after(0, ui_rev)
+                except Exception as ex:
+                    def ui_err():
+                        self.btn_test_proxy.configure(state="normal", text="🧪 Test Connection (فحص الاتصال والطبقة المحمية)")
+                        self.lbl_proxy_live_status.configure(text="● Disconnected (غير متصل)", text_color="#dc3545")
+                        self.lbl_proxy_ping_detail.configure(text=f"❌ Failed to reach mirror: {ex}", text_color="#dc3545")
+                    self.after(0, ui_err)
+            threading.Thread(target=worker_rev, daemon=True).start()
+            return
+
         if not server or not port_str:
             self._show_proxy_msg("⚠️ Please enter server host and port first.", "#e0a800")
             return
@@ -7618,21 +7985,21 @@ class MasterMiniApp(ctk.CTk):
         try:
             port = int(port_str)
         except ValueError:
-            self._show_proxy_msg("❌ Port must be an integer (e.g. 443).", "#dc3545")
+            self._show_proxy_msg("❌ Port must be an integer (e.g. 10808 or 443).", "#dc3545")
             return
 
         self.btn_test_proxy.configure(state="disabled", text="⏳ Testing connection...")
         self.lbl_proxy_live_status.configure(text="● Testing...", text_color="#f39c12")
-        self.lbl_proxy_ping_detail.configure(text=f"Connecting to {server}:{port}...", text_color="#f39c12")
+        self.lbl_proxy_ping_detail.configure(text=f"Testing connection to {server}:{port}...", text_color="#f39c12")
 
         def worker():
             ok, latency, err = test_proxy_ping(server, port, timeout=4.0)
             def update_ui():
-                self.btn_test_proxy.configure(state="normal", text="🧪 Test Connection (فحص الاتصال)")
+                self.btn_test_proxy.configure(state="normal", text="🧪 Test Connection (فحص الاتصال والطبقة المحمية)")
                 if ok:
                     self.lbl_proxy_live_status.configure(text="● Connected (متصل)", text_color="#28a748")
-                    self.lbl_proxy_ping_detail.configure(text=f"⚡ Server is reachable! Ping: {latency} ms", text_color="#28a748")
-                    self._show_proxy_msg(f"✅ Host is reachable! Latency: {latency} ms", "#28a748")
+                    self.lbl_proxy_ping_detail.configure(text=f"⚡ Proxy reachable! Latency: {latency} ms", text_color="#28a748")
+                    self._show_proxy_msg(f"✅ Proxy server is reachable! Latency: {latency} ms", "#28a748")
                 else:
                     self.lbl_proxy_live_status.configure(text="● Disconnected (غير متصل)", text_color="#dc3545")
                     self.lbl_proxy_ping_detail.configure(text=f"❌ Failed to reach {server}:{port} ({err})", text_color="#dc3545")
@@ -7652,7 +8019,7 @@ class MasterMiniApp(ctk.CTk):
 
         self.save_proxy_settings_gui()
         open_telegram_proxy(server, port, secret)
-        self._show_proxy_msg("🚀 Telegram proxy link dispatched!", "#0088cc")
+        self._show_proxy_msg("🚀 Telegram Desktop proxy link dispatched!", "#0088cc")
 
     def copy_proxy_channel_link(self):
         try:
@@ -7665,7 +8032,7 @@ class MasterMiniApp(ctk.CTk):
     def _show_proxy_msg(self, text, color="#28a748"):
         try:
             self.lbl_proxy_msg.configure(text=text, text_color=color)
-            self.after(4500, lambda: self.lbl_proxy_msg.configure(text="") if self.lbl_proxy_msg.cget("text") == text else None)
+            self.after(5500, lambda: self.lbl_proxy_msg.configure(text="") if self.lbl_proxy_msg.cget("text") == text else None)
         except Exception:
             pass
 

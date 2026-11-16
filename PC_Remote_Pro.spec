@@ -3,7 +3,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('PC_Remote_Pro.ico', '.'), ('PC_Remote_Pro.jpg', '.'), ('PC_Remote_Pro.png', '.')]
 binaries = []
-hiddenimports = []
+hiddenimports = ['socks', 'socksio', 'httpx_socks', 'python_socks']
 tmp_ret = collect_all('customtkinter')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
