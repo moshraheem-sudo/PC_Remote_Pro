@@ -44,6 +44,7 @@
 
 | الميزة الجديدة في v4.2 | الوصف التقني الفائق | الحالة |
 | :--- | :--- | :---: |
+| **🛡️ Built-in MTProto Proxy Manager** | مدير بروكسي MTProto مدمج يدعم السيرفر والمنفذ والمفتاح مع فحص مباشر لسرعة الاستجابة بالمللي ثانية (Ping Latency)، وتعبئة تلقائية، وفتح التيليجرام بضغطة زر ورابط مباشر لقناة [@ProxyMTProto](https://t.me/ProxyMTProto). | **مكتمل ومفعل** ✅ |
 | **ℹ️ Interactive In-App Setup Guide** | شاشة إرشادات متكاملة بنقاط واضحة بالإنجليزية مع أزرار مباشرة لفتح [@BotFather](https://t.me/BotFather) و [@userinfobot](https://t.me/userinfobot) في تيليجرام لجلب التوكن والـ Chat ID فوراً. | **مكتمل ومفعل** ✅ |
 | **📁 Separated Files Hub & Real-time Text Hub** | فصل شاشة الإعدادات (`Manage ⚙️`) عن مركز الملفات والرسائل (`Files Hub 📁`) مع دعم السحب والإفلات (Drag & Drop) والنسخ اللحظي إلى الحافظة. | **مكتمل ومفعل** ✅ |
 | **⚡ 200MB File Transfers with Auto-Split** | رفع الحد الأقصى للملفات إلى 200 ميجابايت مع تجزئة الملفات الكبيرة تلقائياً وضغطها ودعم البث المباشر حتى 600 ثانية لمنع انتهاء المهلة. | **مكتمل ومفعل** ✅ |
@@ -70,7 +71,7 @@ To connect your PC to Telegram, you need two credentials:
 1. **Telegram Bot Token**: Created via [@BotFather](https://t.me/BotFather) (`/newbot`).
 2. **Personal Chat ID**: Retrieved via [@userinfobot](https://t.me/userinfobot) (send `/start`).
 
-Inside the application, click the **`ℹ️ INFO`** button in the dashboard or **`ℹ️ Setup Guide & Info`** to read the full step-by-step instructions and click direct links to open both bots in Telegram.
+Inside the application, click the **`🛡️ Proxy`** button to configure MTProto proxies with live latency testing and direct Telegram activation, or view step-by-step bot configuration with direct links to [@BotFather](https://t.me/BotFather) and [@userinfobot](https://t.me/userinfobot). Also find latest free proxies directly from [@ProxyMTProto](https://t.me/ProxyMTProto).
 
 ---
 

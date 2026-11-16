@@ -1148,17 +1148,70 @@ def xor_crypt(data: bytes, key: bytes) -> bytes:
     key_len = len(key)
     return bytes([b ^ key[i % key_len] for i, b in enumerate(data)])
 
-def save_config(accounts_list, autostart=True, security_guard=None, download_folder=None):
-    global SECURITY_GUARD_SETTINGS, DOWNLOADS_FOLDER
+PROXY_SETTINGS = {
+    "server": "",
+    "port": "",
+    "secret": "",
+    "enabled": False
+}
+
+def test_proxy_ping(host: str, port: int, timeout: float = 3.5) -> tuple[bool, float, str]:
+    """Tests TCP socket reachability to MTProto proxy host and port, returning (success, latency_ms, error_msg)."""
+    start = time.time()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((host.strip(), int(port)))
+        latency = (time.time() - start) * 1000.0
+        sock.close()
+        return True, round(latency, 1), ""
+    except Exception as e:
+        return False, 0.0, str(e)
+
+def parse_telegram_proxy_link(url_str: str) -> tuple[str, str, str]:
+    """Parses tg://proxy? or https://t.me/proxy? link into (server, port, secret)."""
+    from urllib.parse import urlparse, parse_qs
+    url_str = url_str.strip()
+    if url_str.startswith("tg://proxy?"):
+        url_str = url_str.replace("tg://proxy?", "https://t.me/proxy?")
+    elif url_str.startswith("tg://"):
+        url_str = "https://t.me/" + url_str[5:]
+    parsed = urlparse(url_str)
+    qs = parse_qs(parsed.query)
+    server = qs.get("server", [""])[0]
+    port = qs.get("port", [""])[0]
+    secret = qs.get("secret", [""])[0]
+    return server, port, secret
+
+def open_telegram_proxy(server: str, port: str, secret: str):
+    """Invokes Telegram Desktop or browser with the MTProto proxy configuration."""
+    server = server.strip()
+    port = port.strip()
+    secret = secret.strip()
+    tg_uri = f"tg://proxy?server={server}&port={port}&secret={secret}"
+    https_url = f"https://t.me/proxy?server={server}&port={port}&secret={secret}"
+    try:
+        os.startfile(tg_uri)
+    except Exception:
+        try:
+            webbrowser.open(tg_uri)
+        except Exception:
+            webbrowser.open(https_url)
+
+def save_config(accounts_list, autostart=True, security_guard=None, download_folder=None, proxy=None):
+    global SECURITY_GUARD_SETTINGS, DOWNLOADS_FOLDER, PROXY_SETTINGS
     if security_guard is not None:
         SECURITY_GUARD_SETTINGS = security_guard
     if download_folder is not None:
         DOWNLOADS_FOLDER = download_folder
+    if proxy is not None:
+        PROXY_SETTINGS = proxy
     data = {
         "accounts": accounts_list,
         "autostart": autostart,
         "security_guard": SECURITY_GUARD_SETTINGS,
         "download_folder": DOWNLOADS_FOLDER,
+        "proxy": PROXY_SETTINGS,
         "saved_at": time.time(),
         "version": APP_VERSION
     }
@@ -1199,7 +1252,7 @@ def save_config(accounts_list, autostart=True, security_guard=None, download_fol
         pass
 
 def load_config():
-    global SECURITY_GUARD_SETTINGS
+    global SECURITY_GUARD_SETTINGS, PROXY_SETTINGS
     targets = [CONFIG_JSON_PATH, CONFIG_BACKUP_PATH, LOCAL_BACKUP_PATH]
     for target in targets:
         if os.path.exists(target):
@@ -1213,6 +1266,8 @@ def load_config():
                             SECURITY_GUARD_SETTINGS.update(data["security_guard"])
                         if "download_folder" in data and isinstance(data["download_folder"], str):
                             set_download_folder(data["download_folder"])
+                        if "proxy" in data and isinstance(data["proxy"], dict):
+                            PROXY_SETTINGS.update(data["proxy"])
                         return data
             except Exception:
                 continue
@@ -5246,12 +5301,14 @@ class MasterMiniApp(ctk.CTk):
         self.frame_password_set = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
         self.frame_password_auth = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
         self.frame_info_guide = ctk.CTkFrame(self.root_scroll, fg_color="transparent")      # Info & Instructions Guide
+        self.frame_proxy = ctk.CTkFrame(self.root_scroll, fg_color="transparent")           # MTProto Proxy Manager
 
         self.setup_dashboard_ui()
         self.setup_editor_ui()
         self.setup_transfer_hub_ui()
         self.setup_password_ui()
         self.setup_info_guide_ui()
+        self.setup_proxy_ui()
 
         # Compact Footer
         self.lbl_footer = ctk.CTkLabel(
@@ -5317,18 +5374,18 @@ class MasterMiniApp(ctk.CTk):
         )
         self.lbl_dash_subtitle.pack(anchor="w")
 
-        self.btn_header_info = ctk.CTkButton(
+        self.btn_header_proxy = ctk.CTkButton(
             self.header_dash,
-            text="ℹ️ INFO",
-            width=68,
+            text="🛡️ Proxy",
+            width=70,
             height=26,
-            fg_color="#17a2b8",
-            hover_color="#138496",
+            fg_color="#0088cc",
+            hover_color="#006699",
             text_color="#FFFFFF",
             font=ctk.CTkFont(size=10, weight="bold"),
-            command=self.show_info_guide
+            command=self.show_proxy_manager
         )
-        self.btn_header_info.pack(side="right", padx=(0, 2))
+        self.btn_header_proxy.pack(side="right", padx=(0, 2))
 
         self.scroll_accounts = ctk.CTkScrollableFrame(self.frame_dashboard, width=330, height=190)
         self.scroll_accounts.pack(padx=6, pady=4, fill="both", expand=True)
@@ -5595,6 +5652,7 @@ class MasterMiniApp(ctk.CTk):
         self.frame_password_set.pack_forget()
         self.frame_password_auth.pack_forget()
         self.frame_info_guide.pack_forget()
+        self.frame_proxy.pack_forget()
         self.refresh_accounts_dashboard()
         self.lbl_storage_path.configure(text=get_download_folder())
         self.frame_dashboard.pack(fill="both", expand=True)
@@ -5786,6 +5844,7 @@ class MasterMiniApp(ctk.CTk):
         self.frame_password_set.pack_forget()
         self.frame_password_auth.pack_forget()
         self.frame_info_guide.pack_forget()
+        self.frame_proxy.pack_forget()
         self.active_account = acc
 
         self.is_token_visible = False
@@ -6096,6 +6155,7 @@ class MasterMiniApp(ctk.CTk):
         self.frame_password_set.pack_forget()
         self.frame_password_auth.pack_forget()
         self.frame_info_guide.pack_forget()
+        self.frame_proxy.pack_forget()
 
         self.active_account = acc
         name = acc.get("name", "Account")
@@ -6789,6 +6849,7 @@ class MasterMiniApp(ctk.CTk):
         self.frame_transfer_hub.pack_forget()
         self.frame_password_auth.pack_forget()
         self.frame_info_guide.pack_forget()
+        self.frame_proxy.pack_forget()
 
         acc_name = self.active_account.get("name", "Account")
         has_pwd = bool(self.active_account.get("pwd_hash"))
@@ -6849,6 +6910,7 @@ class MasterMiniApp(ctk.CTk):
         self.frame_transfer_hub.pack_forget()
         self.frame_password_set.pack_forget()
         self.frame_info_guide.pack_forget()
+        self.frame_proxy.pack_forget()
 
         self._pending_auth_acc = acc
         self.lbl_auth_acc_name.configure(text=f"Account: '{acc.get('name', 'Account')}'")
@@ -6890,7 +6952,19 @@ class MasterMiniApp(ctk.CTk):
         self.frame_transfer_hub.pack_forget()
         self.frame_password_set.pack_forget()
         self.frame_password_auth.pack_forget()
+        self.frame_proxy.pack_forget()
         self.frame_info_guide.pack(fill="both", expand=True)
+
+    def show_proxy_manager(self):
+        """Displays the MTProto Proxy screen."""
+        self.frame_dashboard.pack_forget()
+        self.frame_editor.pack_forget()
+        self.frame_transfer_hub.pack_forget()
+        self.frame_password_set.pack_forget()
+        self.frame_password_auth.pack_forget()
+        self.frame_info_guide.pack_forget()
+        self.load_proxy_settings_into_ui()
+        self.frame_proxy.pack(fill="both", expand=True)
 
     # ----------------- Screen 6: Information & Setup Guide (INFO) -----------------
     def setup_info_guide_ui(self):
@@ -7113,6 +7187,487 @@ class MasterMiniApp(ctk.CTk):
             command=self.show_dashboard
         )
         btn_bottom_back.pack(fill="x", padx=10, pady=(4, 12))
+
+    # ----------------- Screen 7: MTProto Proxy Manager (Proxy 🛡️) -----------------
+    def setup_proxy_ui(self):
+        # Header toolbar
+        self.header_proxy = ctk.CTkFrame(self.frame_proxy, fg_color="transparent")
+        self.header_proxy.pack(fill="x", padx=10, pady=(4, 4))
+
+        btn_back = ctk.CTkButton(
+            self.header_proxy,
+            text="◀ Back",
+            width=70,
+            height=26,
+            fg_color="#333333",
+            hover_color="#444444",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self.show_dashboard
+        )
+        btn_back.pack(side="left")
+
+        if self.logo_ctk:
+            lbl_logo = ctk.CTkLabel(self.header_proxy, image=self.logo_ctk, text="")
+            lbl_logo.pack(side="left", padx=8)
+
+        lbl_title = ctk.CTkLabel(
+            self.header_proxy,
+            text="MTProto Proxy Manager",
+            font=ctk.CTkFont(size=13, weight="bold")
+        )
+        lbl_title.pack(side="left", padx=4)
+
+        # Scrollable container for proxy controls
+        scroll_proxy = ctk.CTkScrollableFrame(self.frame_proxy, height=520)
+        scroll_proxy.pack(fill="both", expand=True, padx=6, pady=(0, 4))
+
+        # --- Status Card ---
+        card_status = ctk.CTkFrame(scroll_proxy, fg_color="#18202b", corner_radius=8, border_width=1, border_color="#0088cc")
+        card_status.pack(fill="x", padx=4, pady=(2, 6))
+
+        row_status = ctk.CTkFrame(card_status, fg_color="transparent")
+        row_status.pack(fill="x", padx=10, pady=8)
+
+        lbl_status_title = ctk.CTkLabel(
+            row_status,
+            text="Proxy Status (الحالة):",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#00bcd4"
+        )
+        lbl_status_title.pack(side="left")
+
+        self.lbl_proxy_live_status = ctk.CTkLabel(
+            row_status,
+            text="● Idle / Not Tested",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#aaaaaa"
+        )
+        self.lbl_proxy_live_status.pack(side="right")
+
+        self.lbl_proxy_ping_detail = ctk.CTkLabel(
+            card_status,
+            text="Click 'Test Connection' below to check live socket latency.",
+            font=ctk.CTkFont(size=9),
+            text_color="#888888"
+        )
+        self.lbl_proxy_ping_detail.pack(anchor="w", padx=10, pady=(0, 6))
+
+        # --- Card 1: Quick Auto-Fill from Link ---
+        card_import = ctk.CTkFrame(scroll_proxy, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
+        card_import.pack(fill="x", padx=4, pady=(0, 6))
+
+        lbl_import_title = ctk.CTkLabel(
+            card_import,
+            text="⚡ Quick Auto-Fill from Telegram Link:",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#00bcd4"
+        )
+        lbl_import_title.pack(anchor="w", padx=10, pady=(6, 2))
+
+        row_import = ctk.CTkFrame(card_import, fg_color="transparent")
+        row_import.pack(fill="x", padx=10, pady=(0, 6))
+
+        self.entry_proxy_link = ctk.CTkEntry(
+            row_import,
+            placeholder_text="tg://proxy?server=...&port=...&secret=...",
+            font=ctk.CTkFont(size=10),
+            height=28
+        )
+        self.entry_proxy_link.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        btn_parse_link = ctk.CTkButton(
+            row_import,
+            text="📥 Auto-Fill",
+            width=70,
+            height=28,
+            fg_color="#0088cc",
+            hover_color="#006699",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self.auto_fill_proxy_from_link
+        )
+        btn_parse_link.pack(side="right")
+
+        # --- Card 2: Proxy Server Settings (Host, Port, Secret) ---
+        card_fields = ctk.CTkFrame(scroll_proxy, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
+        card_fields.pack(fill="x", padx=4, pady=(0, 6))
+
+        # 1. Server / Host (الخادم)
+        lbl_server = ctk.CTkLabel(
+            card_fields,
+            text="Server / Host (الخادم):",
+            font=ctk.CTkFont(size=10, weight="bold")
+        )
+        lbl_server.pack(anchor="w", padx=10, pady=(6, 2))
+
+        row_server = ctk.CTkFrame(card_fields, fg_color="transparent")
+        row_server.pack(fill="x", padx=10, pady=(0, 4))
+
+        self.entry_proxy_server = ctk.CTkEntry(
+            row_server,
+            placeholder_text="e.g. 149.154.175.50 or proxy.domain.com",
+            font=ctk.CTkFont(size=10),
+            height=28
+        )
+        self.entry_proxy_server.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        btn_paste_server = ctk.CTkButton(
+            row_server,
+            text="📋",
+            width=28,
+            height=28,
+            fg_color="#333333",
+            hover_color="#444444",
+            command=lambda: self._paste_into(self.entry_proxy_server)
+        )
+        btn_paste_server.pack(side="left", padx=(0, 2))
+
+        btn_clear_server = ctk.CTkButton(
+            row_server,
+            text="✖",
+            width=28,
+            height=28,
+            fg_color="#dc3545",
+            hover_color="#c82333",
+            command=lambda: self.entry_proxy_server.delete(0, "end")
+        )
+        btn_clear_server.pack(side="left")
+
+        # 2. Port (المنفذ)
+        lbl_port = ctk.CTkLabel(
+            card_fields,
+            text="Port (المنفذ):",
+            font=ctk.CTkFont(size=10, weight="bold")
+        )
+        lbl_port.pack(anchor="w", padx=10, pady=(4, 2))
+
+        row_port = ctk.CTkFrame(card_fields, fg_color="transparent")
+        row_port.pack(fill="x", padx=10, pady=(0, 4))
+
+        self.entry_proxy_port = ctk.CTkEntry(
+            row_port,
+            placeholder_text="e.g. 443 or 8443",
+            font=ctk.CTkFont(size=10),
+            height=28
+        )
+        self.entry_proxy_port.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        btn_paste_port = ctk.CTkButton(
+            row_port,
+            text="📋",
+            width=28,
+            height=28,
+            fg_color="#333333",
+            hover_color="#444444",
+            command=lambda: self._paste_into(self.entry_proxy_port)
+        )
+        btn_paste_port.pack(side="left", padx=(0, 2))
+
+        btn_clear_port = ctk.CTkButton(
+            row_port,
+            text="✖",
+            width=28,
+            height=28,
+            fg_color="#dc3545",
+            hover_color="#c82333",
+            command=lambda: self.entry_proxy_port.delete(0, "end")
+        )
+        btn_clear_port.pack(side="left")
+
+        # 3. Secret / Key (المفتاح)
+        lbl_secret = ctk.CTkLabel(
+            card_fields,
+            text="Secret / Key (المفتاح):",
+            font=ctk.CTkFont(size=10, weight="bold")
+        )
+        lbl_secret.pack(anchor="w", padx=10, pady=(4, 2))
+
+        row_secret = ctk.CTkFrame(card_fields, fg_color="transparent")
+        row_secret.pack(fill="x", padx=10, pady=(0, 6))
+
+        self.is_proxy_secret_visible = False
+        self.entry_proxy_secret = ctk.CTkEntry(
+            row_secret,
+            placeholder_text="e.g. ee... or 7g... or dd...",
+            font=ctk.CTkFont(size=10),
+            height=28,
+            show="*"
+        )
+        self.entry_proxy_secret.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        self.btn_eye_proxy_secret = ctk.CTkButton(
+            row_secret,
+            text="👁️",
+            width=28,
+            height=28,
+            fg_color="#333333",
+            hover_color="#444444",
+            command=self.toggle_proxy_secret_visibility
+        )
+        self.btn_eye_proxy_secret.pack(side="left", padx=(0, 2))
+
+        btn_paste_secret = ctk.CTkButton(
+            row_secret,
+            text="📋",
+            width=28,
+            height=28,
+            fg_color="#333333",
+            hover_color="#444444",
+            command=lambda: self._paste_into(self.entry_proxy_secret)
+        )
+        btn_paste_secret.pack(side="left", padx=(0, 2))
+
+        btn_clear_secret = ctk.CTkButton(
+            row_secret,
+            text="✖",
+            width=28,
+            height=28,
+            fg_color="#dc3545",
+            hover_color="#c82333",
+            command=lambda: self.entry_proxy_secret.delete(0, "end")
+        )
+        btn_clear_secret.pack(side="left")
+
+        # --- Card 3: Action Buttons (Test, Save, Connect in Telegram) ---
+        card_actions = ctk.CTkFrame(scroll_proxy, fg_color="transparent")
+        card_actions.pack(fill="x", padx=4, pady=(2, 6))
+
+        self.btn_test_proxy = ctk.CTkButton(
+            card_actions,
+            text="🧪 Test Connection (فحص الاتصال)",
+            height=30,
+            fg_color="#f39c12",
+            hover_color="#d68910",
+            text_color="#000000",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self.test_proxy_connection_gui
+        )
+        self.btn_test_proxy.pack(fill="x", pady=(0, 4))
+
+        self.btn_save_proxy = ctk.CTkButton(
+            card_actions,
+            text="💾 Save Proxy Settings (حفظ الإعدادات)",
+            height=30,
+            fg_color="#28a748",
+            hover_color="#218838",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self.save_proxy_settings_gui
+        )
+        self.btn_save_proxy.pack(fill="x", pady=(0, 4))
+
+        self.btn_open_tg_proxy = ctk.CTkButton(
+            card_actions,
+            text="🚀 Connect Telegram via this Proxy (الاتصال في تيليجرام)",
+            height=32,
+            fg_color="#0088cc",
+            hover_color="#006699",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self.launch_telegram_with_proxy
+        )
+        self.btn_open_tg_proxy.pack(fill="x", pady=(0, 6))
+
+        # In-window Toast / Notification label
+        self.lbl_proxy_msg = ctk.CTkLabel(
+            card_actions,
+            text="",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#28a748"
+        )
+        self.lbl_proxy_msg.pack(fill="x", pady=(0, 4))
+
+        # --- Card 4: Official Proxy Channel (@ProxyMTProto) ---
+        card_channel = ctk.CTkFrame(scroll_proxy, fg_color="#18202b", corner_radius=8, border_width=1, border_color="#2b3b4f")
+        card_channel.pack(fill="x", padx=4, pady=(2, 6))
+
+        lbl_ch_title = ctk.CTkLabel(
+            card_channel,
+            text="📢 Telegram MTProto Channel (@ProxyMTProto)",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#00bcd4"
+        )
+        lbl_ch_title.pack(anchor="w", padx=10, pady=(6, 2))
+
+        lbl_ch_desc = ctk.CTkLabel(
+            card_channel,
+            text="Get updated high-speed MTProto proxies daily directly from the official channel @ProxyMTProto.\n"
+                 "احصل على أحدث سيرفرات البروكسي السريعة يومياً مجاناً:",
+            font=ctk.CTkFont(size=9),
+            justify="left",
+            wraplength=330,
+            text_color="#cccccc"
+        )
+        lbl_ch_desc.pack(anchor="w", padx=10, pady=(0, 6))
+
+        row_ch_btns = ctk.CTkFrame(card_channel, fg_color="transparent")
+        row_ch_btns.pack(fill="x", padx=10, pady=(0, 8))
+
+        btn_open_ch = ctk.CTkButton(
+            row_ch_btns,
+            text="✈️ Open @ProxyMTProto in Telegram ↗",
+            height=28,
+            fg_color="#0088cc",
+            hover_color="#006699",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=9, weight="bold"),
+            command=lambda: webbrowser.open("https://t.me/ProxyMTProto")
+        )
+        btn_open_ch.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        btn_copy_ch = ctk.CTkButton(
+            row_ch_btns,
+            text="📋 Copy Link",
+            width=70,
+            height=28,
+            fg_color="#333333",
+            hover_color="#444444",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=9, weight="bold"),
+            command=self.copy_proxy_channel_link
+        )
+        btn_copy_ch.pack(side="right")
+
+        # Bottom Return Button
+        btn_bottom_back = ctk.CTkButton(
+            scroll_proxy,
+            text="◀ Back to Dashboard",
+            height=30,
+            fg_color="#333333",
+            hover_color="#444444",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self.show_dashboard
+        )
+        btn_bottom_back.pack(fill="x", padx=10, pady=(4, 12))
+
+    def _paste_into(self, entry_widget):
+        try:
+            val = self.clipboard_get().strip()
+            if val:
+                entry_widget.delete(0, "end")
+                entry_widget.insert(0, val)
+        except Exception:
+            pass
+
+    def toggle_proxy_secret_visibility(self):
+        self.is_proxy_secret_visible = not self.is_proxy_secret_visible
+        self.entry_proxy_secret.configure(show="" if self.is_proxy_secret_visible else "*")
+        self.btn_eye_proxy_secret.configure(text="🔒" if self.is_proxy_secret_visible else "👁️")
+
+    def auto_fill_proxy_from_link(self):
+        raw_link = self.entry_proxy_link.get().strip()
+        if not raw_link:
+            try:
+                raw_link = self.clipboard_get().strip()
+            except Exception:
+                pass
+        if not raw_link:
+            self._show_proxy_msg("⚠️ Please enter or copy a proxy link first.", "#e0a800")
+            return
+        server, port, secret = parse_telegram_proxy_link(raw_link)
+        if server and port:
+            self.entry_proxy_server.delete(0, "end")
+            self.entry_proxy_server.insert(0, server)
+            self.entry_proxy_port.delete(0, "end")
+            self.entry_proxy_port.insert(0, str(port))
+            if secret:
+                self.entry_proxy_secret.delete(0, "end")
+                self.entry_proxy_secret.insert(0, secret)
+            self._show_proxy_msg("✅ Proxy parameters auto-filled successfully!", "#28a748")
+            self.test_proxy_connection_gui()
+        else:
+            self._show_proxy_msg("❌ Could not parse proxy link. Ensure it starts with tg://proxy? or https://t.me/proxy?", "#dc3545")
+
+    def load_proxy_settings_into_ui(self):
+        global PROXY_SETTINGS
+        self.entry_proxy_server.delete(0, "end")
+        self.entry_proxy_server.insert(0, PROXY_SETTINGS.get("server", ""))
+        self.entry_proxy_port.delete(0, "end")
+        self.entry_proxy_port.insert(0, str(PROXY_SETTINGS.get("port", "")))
+        self.entry_proxy_secret.delete(0, "end")
+        self.entry_proxy_secret.insert(0, PROXY_SETTINGS.get("secret", ""))
+        self.lbl_proxy_msg.configure(text="")
+        if PROXY_SETTINGS.get("server") and PROXY_SETTINGS.get("port"):
+            self.test_proxy_connection_gui()
+        else:
+            self.lbl_proxy_live_status.configure(text="● No Proxy Configured", text_color="#aaaaaa")
+            self.lbl_proxy_ping_detail.configure(text="Enter host and port or paste link above.", text_color="#888888")
+
+    def save_proxy_settings_gui(self):
+        global PROXY_SETTINGS
+        server = self.entry_proxy_server.get().strip()
+        port = self.entry_proxy_port.get().strip()
+        secret = self.entry_proxy_secret.get().strip()
+
+        PROXY_SETTINGS["server"] = server
+        PROXY_SETTINGS["port"] = port
+        PROXY_SETTINGS["secret"] = secret
+        PROXY_SETTINGS["enabled"] = bool(server and port)
+
+        save_config(self.accounts, autostart=self.config.get("autostart", True), proxy=PROXY_SETTINGS)
+        self._show_proxy_msg("✅ Proxy settings saved successfully!", "#28a748")
+
+    def test_proxy_connection_gui(self):
+        server = self.entry_proxy_server.get().strip()
+        port_str = self.entry_proxy_port.get().strip()
+        if not server or not port_str:
+            self._show_proxy_msg("⚠️ Please enter server host and port first.", "#e0a800")
+            return
+
+        try:
+            port = int(port_str)
+        except ValueError:
+            self._show_proxy_msg("❌ Port must be an integer (e.g. 443).", "#dc3545")
+            return
+
+        self.btn_test_proxy.configure(state="disabled", text="⏳ Testing connection...")
+        self.lbl_proxy_live_status.configure(text="● Testing...", text_color="#f39c12")
+        self.lbl_proxy_ping_detail.configure(text=f"Connecting to {server}:{port}...", text_color="#f39c12")
+
+        def worker():
+            ok, latency, err = test_proxy_ping(server, port, timeout=4.0)
+            def update_ui():
+                self.btn_test_proxy.configure(state="normal", text="🧪 Test Connection (فحص الاتصال)")
+                if ok:
+                    self.lbl_proxy_live_status.configure(text="● Connected (متصل)", text_color="#28a748")
+                    self.lbl_proxy_ping_detail.configure(text=f"⚡ Server is reachable! Ping: {latency} ms", text_color="#28a748")
+                    self._show_proxy_msg(f"✅ Host is reachable! Latency: {latency} ms", "#28a748")
+                else:
+                    self.lbl_proxy_live_status.configure(text="● Disconnected (غير متصل)", text_color="#dc3545")
+                    self.lbl_proxy_ping_detail.configure(text=f"❌ Failed to reach {server}:{port} ({err})", text_color="#dc3545")
+                    self._show_proxy_msg(f"❌ Connection failed: {err}", "#dc3545")
+            self.after(0, update_ui)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def launch_telegram_with_proxy(self):
+        server = self.entry_proxy_server.get().strip()
+        port = self.entry_proxy_port.get().strip()
+        secret = self.entry_proxy_secret.get().strip()
+
+        if not server or not port:
+            self._show_proxy_msg("⚠️ Please provide Server and Port first.", "#e0a800")
+            return
+
+        self.save_proxy_settings_gui()
+        open_telegram_proxy(server, port, secret)
+        self._show_proxy_msg("🚀 Telegram proxy link dispatched!", "#0088cc")
+
+    def copy_proxy_channel_link(self):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append("https://t.me/ProxyMTProto")
+            self._show_proxy_msg("📋 Channel link copied: https://t.me/ProxyMTProto", "#0088cc")
+        except Exception:
+            pass
+
+    def _show_proxy_msg(self, text, color="#28a748"):
+        try:
+            self.lbl_proxy_msg.configure(text=text, text_color=color)
+            self.after(4500, lambda: self.lbl_proxy_msg.configure(text="") if self.lbl_proxy_msg.cget("text") == text else None)
+        except Exception:
+            pass
 
     def run_connection_test(self):
         token = self.entry_token.get().strip()
@@ -7444,7 +7999,7 @@ class MasterMiniApp(ctk.CTk):
         try:
             self.deiconify()
             self.state("normal")
-            if not self.frame_dashboard.winfo_ismapped() and not self.frame_editor.winfo_ismapped() and not self.frame_transfer_hub.winfo_ismapped() and not self.frame_password_set.winfo_ismapped() and not self.frame_password_auth.winfo_ismapped() and not self.frame_info_guide.winfo_ismapped():
+            if not self.frame_dashboard.winfo_ismapped() and not self.frame_editor.winfo_ismapped() and not self.frame_transfer_hub.winfo_ismapped() and not self.frame_password_set.winfo_ismapped() and not self.frame_password_auth.winfo_ismapped() and not self.frame_info_guide.winfo_ismapped() and not self.frame_proxy.winfo_ismapped():
                 self.show_dashboard()
             elif self.frame_dashboard.winfo_ismapped():
                 self.refresh_accounts_dashboard()
