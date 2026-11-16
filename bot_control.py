@@ -8,7 +8,7 @@ import ctypes
 # Register Windows AppUserModelID early for taskbar icon binding
 if sys.platform == "win32":
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PC_Remote_Pro.UniversalHub.v4.1")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PC_Remote_Pro.UniversalHub.v4.2")
     except Exception:
         pass
 
@@ -40,7 +40,8 @@ REQUIRED_LIBS = {
     "psutil": "psutil",
     "telegram": "python-telegram-bot",
     "pystray": "pystray",
-    "cv2": "opencv-python"
+    "cv2": "opencv-python",
+    "windnd": "windnd"
 }
 
 missing_libs = []
@@ -66,6 +67,10 @@ import platform
 import threading
 import base64
 import hashlib
+import zipfile
+import glob
+import math
+import shutil
 import ctypes
 from ctypes import wintypes
 import webbrowser
@@ -85,6 +90,12 @@ try:
     HAS_CV2 = True
 except ImportError:
     HAS_CV2 = False
+
+try:
+    import windnd
+    HAS_WINDND = True
+except Exception:
+    HAS_WINDND = False
 
 import telegram.error
 from telegram import (
@@ -132,7 +143,7 @@ except Exception:
 
 # ----------------- Application Info -----------------
 APP_NAME = "PC Remote Pro"
-APP_VERSION = "v4.1"
+APP_VERSION = "v4.2"
 DEVELOPER_NAME = "Mohammed Shaheed"
 MASTER_APP_INSTANCE = None
 SECURITY_GUARD_SETTINGS = {
@@ -214,7 +225,488 @@ def notify_file_saved(file_name: str, file_path: str):
         except Exception:
             pass
 
+        try:
+            if MASTER_APP_INSTANCE:
+                MASTER_APP_INSTANCE.after(0, MASTER_APP_INSTANCE.on_file_received_event, file_name, file_path)
+        except Exception:
+            pass
+
     threading.Thread(target=_do, daemon=True).start()
+
+# ----------------- File Transfer Hub & Multi-Part Large File Infrastructure -----------------
+TRANSFERS_LOG_PATH = os.path.join(DATA_DIR, "file_transfers_log.json")
+
+def format_size_str(num_bytes: int) -> str:
+    try:
+        num_bytes = int(num_bytes)
+    except Exception:
+        return "0 B"
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    elif num_bytes < 1024 * 1024:
+        return f"{num_bytes / 1024:.1f} KB"
+    elif num_bytes < 1024 * 1024 * 1024:
+        return f"{num_bytes / (1024 * 1024):.1f} MB"
+    else:
+        return f"{num_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+def get_file_icon(file_name: str) -> str:
+    ext = os.path.splitext(file_name)[1].lower()
+    if ext in ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.ico'):
+        return "🖼️"
+    elif ext in ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv'):
+        return "🎬"
+    elif ext in ('.mp3', '.ogg', '.wav', '.m4a', '.flac', '.aac'):
+        return "🎵"
+    elif ext in ('.pdf', '.doc', '.docx', '.txt', '.xlsx', '.xls', '.pptx', '.ppt'):
+        return "📄"
+    elif ext in ('.zip', '.rar', '.7z', '.tar', '.gz') or re.search(r'\.part\d+$', file_name, re.IGNORECASE):
+        return "📦"
+    elif ext in ('.py', '.exe', '.bat', '.cmd', '.sh', '.ps1', '.vbs'):
+        return "⚙️"
+    else:
+        return "📁"
+
+def load_transfers_history() -> list[dict]:
+    items = []
+    if os.path.exists(TRANSFERS_LOG_PATH):
+        try:
+            with open(TRANSFERS_LOG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    items = data
+        except Exception:
+            pass
+    else:
+        dl_folder = get_download_folder()
+        if os.path.exists(dl_folder):
+            try:
+                for entry in os.scandir(dl_folder):
+                    if entry.is_file() and not entry.name.startswith("."):
+                        full_p = os.path.abspath(entry.path)
+                        stat = entry.stat()
+                        items.append({
+                            "name": entry.name,
+                            "path": full_p,
+                            "size": stat.st_size,
+                            "time": stat.st_mtime,
+                            "direction": "received",
+                            "chat_id": None
+                        })
+            except Exception:
+                pass
+        try:
+            with open(TRANSFERS_LOG_PATH, "w", encoding="utf-8") as f:
+                json.dump(items, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    valid_items = [it for it in items if os.path.exists(it.get("path", ""))]
+    valid_items.sort(key=lambda x: x.get("time", 0), reverse=True)
+    return valid_items
+
+def clear_transfers_history():
+    """Clears all sent and received transfer records from the log."""
+    try:
+        with open(TRANSFERS_LOG_PATH, "w", encoding="utf-8") as f:
+            json.dump([], f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def remove_transfer_record(file_path: str):
+    """Removes a single entry from the file transfer log."""
+    try:
+        items = []
+        if os.path.exists(TRANSFERS_LOG_PATH):
+            try:
+                with open(TRANSFERS_LOG_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        items = data
+            except Exception:
+                pass
+        abs_p = os.path.abspath(file_path)
+        items = [x for x in items if os.path.abspath(x.get("path", "")) != abs_p]
+        with open(TRANSFERS_LOG_PATH, "w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def record_transfer(file_name: str, file_path: str, file_size: int, direction: str = "received", chat_id: int = None):
+    try:
+        items = []
+        if os.path.exists(TRANSFERS_LOG_PATH):
+            try:
+                with open(TRANSFERS_LOG_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        items = data
+            except Exception:
+                pass
+
+        abs_p = os.path.abspath(file_path)
+        entry = {
+            "name": file_name,
+            "path": abs_p,
+            "size": file_size,
+            "time": time.time(),
+            "direction": direction,
+            "chat_id": chat_id
+        }
+        items = [x for x in items if os.path.abspath(x.get("path", "")) != abs_p]
+        items.insert(0, entry)
+        items = items[:150]
+
+        with open(TRANSFERS_LOG_PATH, "w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def recombine_split_parts(storage_dir: str, base_name: str) -> tuple[bool, str]:
+    pattern = os.path.join(storage_dir, f"{base_name}.part*")
+    parts = sorted(glob.glob(pattern))
+    if not parts:
+        return False, "No file parts found in storage folder."
+
+    target_path = os.path.join(storage_dir, base_name)
+    try:
+        with open(target_path, "wb") as out_f:
+            for p in parts:
+                with open(p, "rb") as in_f:
+                    while chunk := in_f.read(1024 * 1024):
+                        out_f.write(chunk)
+
+        if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
+            full_size = os.path.getsize(target_path)
+            for p in parts:
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+            record_transfer(base_name, target_path, full_size, direction="recombined")
+            if MASTER_APP_INSTANCE:
+                try:
+                    MASTER_APP_INSTANCE.after(0, MASTER_APP_INSTANCE.refresh_file_hub_list)
+                except Exception:
+                    pass
+            return True, target_path
+        else:
+            return False, "Recombined file is empty after merge."
+    except Exception as e:
+        return False, str(e)
+
+# ----------------- Shared Text Messages Infrastructure -----------------
+TEXT_MESSAGES_LOG_PATH = os.path.join(DATA_DIR, "text_messages_log.json")
+
+def load_text_messages_history() -> list[dict]:
+    if os.path.exists(TEXT_MESSAGES_LOG_PATH):
+        try:
+            with open(TEXT_MESSAGES_LOG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except Exception:
+            pass
+    return []
+
+def record_text_message(text: str, direction: str = "received", sender_name: str = "Telegram User", chat_id: int = None):
+    try:
+        items = load_text_messages_history()
+        entry = {
+            "text": text,
+            "direction": direction,
+            "sender": sender_name,
+            "chat_id": chat_id,
+            "time": time.time()
+        }
+        items.insert(0, entry)
+        items = items[:200]
+        with open(TEXT_MESSAGES_LOG_PATH, "w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def clear_text_messages_history():
+    try:
+        if os.path.exists(TEXT_MESSAGES_LOG_PATH):
+            os.remove(TEXT_MESSAGES_LOG_PATH)
+    except Exception:
+        pass
+
+async def send_large_file_split_telegram(bot, chat_id: int, file_path: str, auto_split: bool = True, progress_callback=None) -> tuple[bool, str]:
+    """
+    Sends file to Telegram with automatic compression and chunk splitting if > 48MB.
+    Files over 200 MB are prevented to maintain app responsiveness and transfer speed.
+    Equipped with 600s timeouts and resilient stream upload fallback.
+    """
+    if not os.path.exists(file_path):
+        return False, "File not found."
+
+    orig_name = os.path.basename(file_path)
+    file_size = os.path.getsize(file_path)
+    size_mb = file_size / (1024 * 1024)
+
+    # Hard Limit: Maximum 200 MB
+    MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024
+    if file_size > MAX_FILE_SIZE_BYTES:
+        err_msg = f"File '{orig_name}' ({size_mb:.1f} MB) exceeds maximum allowed size of 200 MB. Files over 200 MB cannot be transferred via bot."
+        if progress_callback:
+            progress_callback(0.0, f"❌ Exceeds 200 MB limit ({size_mb:.1f} MB)")
+        return False, err_msg
+
+    # 1. Under 48 MB or auto_split is disabled: Direct upload with extended timeouts and fallback
+    if file_size <= 48 * 1024 * 1024 or not auto_split:
+        if progress_callback:
+            progress_callback(0.2, f"Uploading: {orig_name} ({size_mb:.1f} MB)... Please wait.")
+        try:
+            with open(file_path, "rb") as fl:
+                await bot.send_document(
+                    chat_id=chat_id,
+                    document=fl,
+                    filename=orig_name,
+                    caption=f"📁 File sent from PC:\n{orig_name} ({size_mb:.1f} MB)",
+                    read_timeout=600.0,
+                    write_timeout=600.0,
+                    connect_timeout=60.0
+                )
+            if progress_callback:
+                progress_callback(1.0, f"✅ Successfully sent: {orig_name}")
+            record_transfer(orig_name, file_path, file_size, direction="sent", chat_id=chat_id)
+            return True, "File sent successfully"
+        except Exception as e:
+            # High-speed direct stream fallback via requests
+            try:
+                if progress_callback:
+                    progress_callback(0.5, f"Retrying high-speed stream upload: {orig_name}...")
+                with open(file_path, "rb") as fl:
+                    r = requests.post(
+                        f"https://api.telegram.org/bot{bot.token}/sendDocument",
+                        data={"chat_id": chat_id, "caption": f"📁 File sent from PC:\n{orig_name} ({size_mb:.1f} MB)"},
+                        files={"document": (orig_name, fl, "application/octet-stream")},
+                        timeout=600
+                    )
+                if r.status_code == 200:
+                    if progress_callback:
+                        progress_callback(1.0, f"✅ Successfully sent: {orig_name}")
+                    record_transfer(orig_name, file_path, file_size, direction="sent", chat_id=chat_id)
+                    return True, "File sent successfully via direct stream"
+                else:
+                    return False, f"Telegram API error ({r.status_code}): {r.text}"
+            except Exception as e2:
+                return False, f"Upload error: {e2}"
+
+    # 2. File > 48 MB (and <= 200 MB): Try Fast Zip Compression first
+    if progress_callback:
+        progress_callback(0.1, f"🗜️ File exceeds 50MB ({size_mb:.1f} MB). Auto-compressing...")
+
+    temp_dir = tempfile.mkdtemp(prefix="pcremote_proc_")
+    try:
+        zip_name = f"{os.path.splitext(orig_name)[0]}.zip"
+        zip_path = os.path.join(temp_dir, zip_name)
+        with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            zf.write(file_path, arcname=orig_name)
+
+        zip_size = os.path.getsize(zip_path)
+        zip_mb = zip_size / (1024 * 1024)
+
+        # If compressed zip is <= 48 MB, send it directly!
+        if zip_size <= 48 * 1024 * 1024:
+            if progress_callback:
+                progress_callback(0.5, f"🚀 Compressed to {zip_mb:.1f} MB. Uploading...")
+            saved_pct = int((1.0 - (zip_size / file_size)) * 100)
+            try:
+                with open(zip_path, "rb") as fl:
+                    await bot.send_document(
+                        chat_id=chat_id,
+                        document=fl,
+                        filename=zip_name,
+                        caption=(
+                            f"🗜️ Auto-compressed to fit Telegram 50MB limit:\n"
+                            f"📁 Original: {orig_name} ({size_mb:.1f} MB)\n"
+                            f"📦 Compressed: {zip_name} ({zip_mb:.1f} MB • saved {saved_pct}%)"
+                        ),
+                        read_timeout=600.0,
+                        write_timeout=600.0,
+                        connect_timeout=60.0
+                    )
+            except Exception:
+                with open(zip_path, "rb") as fl:
+                    requests.post(
+                        f"https://api.telegram.org/bot{bot.token}/sendDocument",
+                        data={"chat_id": chat_id, "caption": f"🗜️ Compressed: {zip_name} ({zip_mb:.1f} MB)"},
+                        files={"document": (zip_name, fl, "application/octet-stream")},
+                        timeout=600
+                    )
+            if progress_callback:
+                progress_callback(1.0, f"✅ Successfully compressed and sent: {orig_name}")
+            record_transfer(orig_name, file_path, file_size, direction="sent", chat_id=chat_id)
+            return True, "Compressed and sent successfully"
+
+        # 3. File is still > 48 MB after compression: Split into 45 MB parts
+        CHUNK_SIZE = 45 * 1024 * 1024
+        total_parts = math.ceil(file_size / CHUNK_SIZE)
+
+        if progress_callback:
+            progress_callback(0.2, f"📦 Splitting file into {total_parts} parts...")
+
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"📦 Large file exceeds 50MB ({size_mb:.1f} MB):\n"
+                f"📁 File: {orig_name}\n"
+                f"🔢 Split into: {total_parts} parts (each <= 45MB)\n"
+                f"⏳ Uploading parts sequentially..."
+            ),
+            read_timeout=60.0,
+            write_timeout=60.0
+        )
+
+        part_num = 1
+        with open(file_path, "rb") as src:
+            while True:
+                chunk = src.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                part_name = f"{orig_name}.part{part_num:03d}"
+                part_path = os.path.join(temp_dir, part_name)
+                with open(part_path, "wb") as pf:
+                    pf.write(chunk)
+
+                part_mb = len(chunk) / (1024 * 1024)
+                pct = 0.2 + (0.7 * (part_num / total_parts))
+                if progress_callback:
+                    progress_callback(pct, f"📦 Uploading part {part_num} of {total_parts} ({part_mb:.1f} MB)...")
+
+                try:
+                    with open(part_path, "rb") as pf:
+                        await bot.send_document(
+                            chat_id=chat_id,
+                            document=pf,
+                            filename=part_name,
+                            caption=(
+                                f"📦 Part [{part_num}/{total_parts}] of: {orig_name}\n"
+                                f"📊 Part size: {part_mb:.1f} MB (Total: {size_mb:.1f} MB)"
+                            ),
+                            read_timeout=600.0,
+                            write_timeout=600.0,
+                            connect_timeout=60.0
+                        )
+                except Exception:
+                    with open(part_path, "rb") as pf:
+                        requests.post(
+                            f"https://api.telegram.org/bot{bot.token}/sendDocument",
+                            data={"chat_id": chat_id, "caption": f"📦 Part [{part_num}/{total_parts}] of: {orig_name}"},
+                            files={"document": (part_name, pf, "application/octet-stream")},
+                            timeout=600
+                        )
+                part_num += 1
+                await asyncio.sleep(1)
+
+        # Send Recombine.bat script
+        bat_name = f"Recombine_{orig_name}.bat"
+        bat_path = os.path.join(temp_dir, bat_name)
+        with open(bat_path, "w", encoding="utf-8") as bf:
+            bf.write(
+                f"@echo off\r\n"
+                f"chcp 65001 >nul\r\n"
+                f"title PC Remote Pro - Recombine File\r\n"
+                f"echo ====================================================\r\n"
+                f"echo [PC Remote Pro] Recombining: {orig_name}\r\n"
+                f"echo ====================================================\r\n"
+                f'copy /b "{orig_name}.part*" "{orig_name}"\r\n'
+                f"if exist \"{orig_name}\" (\r\n"
+                f"    echo [SUCCESS] Recombination complete! File: {orig_name}\r\n"
+                f") else (\r\n"
+                f"    echo [ERROR] Failed to merge parts. Ensure all .part files are present.\r\n"
+                f")\r\n"
+                f"pause\r\n"
+            )
+
+        try:
+            with open(bat_path, "rb") as bf:
+                await bot.send_document(
+                    chat_id=chat_id,
+                    document=bf,
+                    filename=bat_name,
+                    caption=(
+                        f"🎉 All file parts uploaded successfully! ({total_parts} parts)\n\n"
+                        f"💡 How to reconstruct original file on any PC:\n"
+                        f"1. Download all parts into the same folder.\n"
+                        f"2. Run the attached {bat_name} script.\n"
+                        f"Or run CMD: copy /b \"{orig_name}.part*\" \"{orig_name}\""
+                    ),
+                    read_timeout=600.0,
+                    write_timeout=600.0,
+                    connect_timeout=60.0
+                )
+        except Exception:
+            with open(bat_path, "rb") as bf:
+                requests.post(
+                    f"https://api.telegram.org/bot{bot.token}/sendDocument",
+                    data={"chat_id": chat_id, "caption": f"Recombine script for: {orig_name}"},
+                    files={"document": (bat_name, bf, "application/octet-stream")},
+                    timeout=600
+                )
+
+        if progress_callback:
+            progress_callback(1.0, f"✅ All {total_parts} parts of {orig_name} sent successfully!")
+        record_transfer(orig_name, file_path, file_size, direction="sent", chat_id=chat_id)
+        return True, f"File split and uploaded successfully ({total_parts} parts)"
+    except Exception as e:
+        return False, str(e)
+    finally:
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+def send_file_to_telegram_sync_bridge(token: str, chat_id: int, file_path: str, auto_split: bool = True, progress_callback=None) -> tuple[bool, str]:
+    bot_entry = ACTIVE_BOT_REGISTRY.get(token)
+    if not bot_entry or not bot_entry.get("app") or not bot_entry.get("loop"):
+        return False, "Telegram bot is currently offline for this account."
+
+    app_inst = bot_entry["app"]
+    bot_loop = bot_entry["loop"]
+    if not bot_loop or bot_loop.is_closed():
+        return False, "Bot event loop is stopped."
+
+    fut = asyncio.run_coroutine_threadsafe(
+        send_large_file_split_telegram(app_inst.bot, chat_id, file_path, auto_split=auto_split, progress_callback=progress_callback),
+        bot_loop
+    )
+    return fut.result(timeout=1200)
+
+def send_text_to_telegram_sync_bridge(token: str, chat_id: int, text: str) -> tuple[bool, str]:
+    bot_entry = ACTIVE_BOT_REGISTRY.get(token)
+    if not bot_entry or not bot_entry.get("app") or not bot_entry.get("loop"):
+        try:
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            resp = requests.post(url, json={"chat_id": chat_id, "text": f"💻 [PC Message]:\n{text}"}, timeout=10)
+            if resp.status_code == 200:
+                record_text_message(text, direction="sent", sender_name="PC User", chat_id=chat_id)
+                return True, "Message sent successfully."
+            else:
+                return False, f"Telegram API error ({resp.status_code}): {resp.text}"
+        except Exception as e:
+            return False, f"Error: {e}"
+
+    app_inst = bot_entry["app"]
+    bot_loop = bot_entry["loop"]
+    if not bot_loop or bot_loop.is_closed():
+        return False, "Bot event loop is stopped."
+
+    async def _send_msg():
+        await app_inst.bot.send_message(chat_id=chat_id, text=f"💻 **[Message from PC]:**\n{text}", parse_mode="Markdown")
+        return True, "Message delivered successfully."
+
+    try:
+        fut = asyncio.run_coroutine_threadsafe(_send_msg(), bot_loop)
+        ok, res = fut.result(timeout=15)
+        if ok:
+            record_text_message(text, direction="sent", sender_name="PC User", chat_id=chat_id)
+        return ok, res
+    except Exception as e:
+        return False, str(e)
 
 PATH_STORE = {}
 PATH_TO_ID = {}
@@ -3065,15 +3557,61 @@ def start_bot_thread(token: str, user_dict_ref: dict):
 
             size_mb = os.path.getsize(target_path) / (1024 * 1024)
             if size_mb > 48:
-                await query.message.reply_text(f"⚠️ Telegram bot file transfer limit is 50MB. (File is `{size_mb:.1f} MB`)")
+                await query.message.reply_text(
+                    f"📦 **الملف كبير ({size_mb:.1f} MB) ويتجاوز حد الـ 50MB.**\n"
+                    f"⚡ جاري البدء في ضغطه وتجزئته وإرساله كأجزاء تلقائياً...",
+                    parse_mode="Markdown"
+                )
+                asyncio.create_task(
+                    send_large_file_split_telegram(
+                        context.bot,
+                        query.message.chat_id,
+                        target_path,
+                        auto_split=True
+                    )
+                )
                 return
 
             await query.message.reply_text(f"⏳ Uploading `{os.path.basename(target_path)}` ({size_mb:.1f} MB)...", parse_mode="Markdown")
             try:
                 with open(target_path, "rb") as f:
                     await query.message.reply_document(document=f, caption=f"📥 `{os.path.basename(target_path)}`")
+                record_transfer(os.path.basename(target_path), target_path, os.path.getsize(target_path), direction="sent", chat_id=query.message.chat_id)
             except Exception as e:
                 await query.message.reply_text(f"❌ Upload failed: {e}")
+
+        elif action == "recombine_parts":
+            await query.answer()
+            part_uid = parts[1]
+            part_path = PATH_STORE.get(part_uid)
+            if not part_path or not os.path.exists(part_path):
+                await query.message.reply_text("❌ Part file not found.")
+                return
+
+            storage_dir = os.path.dirname(part_path)
+            part_name = os.path.basename(part_path)
+            m_part = re.match(r'^(.*?)\.part\d+$', part_name, re.IGNORECASE)
+            base_name = m_part.group(1) if m_part else part_name
+
+            await query.message.reply_text(f"⏳ جاري تجميع ودمج أجزاء `{base_name}`...", parse_mode="Markdown")
+            ok_m, res_m = recombine_split_parts(storage_dir, base_name)
+            if ok_m:
+                merged_path = res_m
+                sz_mb = os.path.getsize(merged_path) / (1024 * 1024)
+                kb = [
+                    [InlineKeyboardButton("🚀 Open on PC Screen", callback_data=f"open_pc:{get_path_id(merged_path)}")],
+                    [InlineKeyboardButton("🏠 Back to Main Menu", callback_data="goto_main")]
+                ]
+                await query.message.reply_text(
+                    f"🎉 **تم اكتمال وتجميع الملف كاملاً على الكمبيوتر بنجاح!**\n\n"
+                    f"📁 اسم الملف: `{base_name}`\n"
+                    f"📊 الحجم النهائي: `{sz_mb:.1f} MB`\n"
+                    f"📂 المسار: `{merged_path}`",
+                    reply_markup=InlineKeyboardMarkup(kb),
+                    parse_mode="Markdown"
+                )
+            else:
+                await query.message.reply_text(f"❌ فشل دمج الأجزاء: {res_m}")
 
         elif action == "search_in":
             await query.answer()
@@ -3913,6 +4451,15 @@ def start_bot_thread(token: str, user_dict_ref: dict):
             await update.message.reply_text("🧮 Calculator opened on PC screen.", reply_markup=get_menu_keyboard("tools", lang))
             return
 
+        # Record incoming message in the text messages history & notify GUI!
+        try:
+            uname = (update.effective_user.first_name or "") if update.effective_user else "Telegram User"
+            record_text_message(txt, direction="received", sender_name=uname, chat_id=uid)
+            if MASTER_APP_INSTANCE:
+                MASTER_APP_INSTANCE.after(0, lambda t=txt, u=uname: MASTER_APP_INSTANCE.on_message_received_event(t, u))
+        except Exception:
+            pass
+
         # Direct text message: Automatically set to PC clipboard for instant copy-paste!
         ok = set_native_clipboard_text(txt)
         if ok:
@@ -4280,6 +4827,8 @@ def start_bot_thread(token: str, user_dict_ref: dict):
 
             # Automatically copy to PC Clipboard
             set_image_to_clipboard(dest)
+            file_size = os.path.getsize(dest) if os.path.exists(dest) else 0
+            record_transfer(save_name, dest, file_size, direction="received", chat_id=uid)
             notify_file_saved(save_name, dest)
 
             kb = [
@@ -4308,6 +4857,8 @@ def start_bot_thread(token: str, user_dict_ref: dict):
             save_name = f"voice_{int(time.time())}.ogg"
             dest = os.path.join(get_download_folder(), save_name)
             await file_obj.download_to_drive(dest)
+            file_size = os.path.getsize(dest) if os.path.exists(dest) else 0
+            record_transfer(save_name, dest, file_size, direction="received", chat_id=update.effective_user.id)
             notify_file_saved(save_name, dest)
             try:
                 os.startfile(dest)
@@ -4321,19 +4872,53 @@ def start_bot_thread(token: str, user_dict_ref: dict):
             return
         lang = get_user_language(update.effective_user.id)
         doc = update.message.document
-        if doc:
+        video = update.message.video
+        audio = update.message.audio
+        media_obj = doc or video or audio
+        if media_obj:
             storage_dir = get_download_folder()
             os.makedirs(storage_dir, exist_ok=True)
-            await update.message.reply_text(f"⏳ Saving `{doc.file_name}` into Storage folder...", parse_mode="Markdown")
-            dest = os.path.join(storage_dir, doc.file_name)
-            tg_file = await context.bot.get_file(doc.file_id)
+            fname = getattr(media_obj, 'file_name', None)
+            if not fname:
+                if video:
+                    fname = f"video_{int(time.time())}.mp4"
+                elif audio:
+                    fname = f"audio_{int(time.time())}.mp3"
+                else:
+                    fname = f"file_{int(time.time())}.bin"
+
+            await update.message.reply_text(f"⏳ Saving `{fname}` into Storage folder...", parse_mode="Markdown")
+            dest = os.path.join(storage_dir, fname)
+            tg_file = await context.bot.get_file(media_obj.file_id)
             await tg_file.download_to_drive(dest)
 
             # If image document, also copy to clipboard
-            if doc.file_name.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp')):
+            if fname.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp')):
                 set_image_to_clipboard(dest)
 
-            notify_file_saved(doc.file_name, dest)
+            file_size = os.path.getsize(dest) if os.path.exists(dest) else (getattr(media_obj, 'file_size', 0) or 0)
+            record_transfer(fname, dest, file_size, direction="received", chat_id=update.effective_user.id)
+            notify_file_saved(fname, dest)
+
+            # Check if received file is a split part
+            m_part = re.match(r'^(.*?)\.part(\d+)$', fname, re.IGNORECASE)
+            if m_part:
+                base_name = m_part.group(1)
+                part_idx = int(m_part.group(2))
+                existing_parts = sorted(glob.glob(os.path.join(storage_dir, f"{base_name}.part*")))
+                kb = [
+                    [InlineKeyboardButton(f"🧩 تجميع الأجزاء الآن ({len(existing_parts)} أجزاء)", callback_data=f"recombine_parts:{get_path_id(dest)}")],
+                    [InlineKeyboardButton("🚀 Open on PC Screen", callback_data=f"open_pc:{get_path_id(dest)}")],
+                    [InlineKeyboardButton("🏠 Back to Main Menu", callback_data="goto_main")]
+                ]
+                await update.message.reply_text(
+                    f"📦 **تم استلام الجزء {part_idx} من الملف الكبير:**\n`{base_name}`\n\n"
+                    f"🔢 عدد الأجزاء المتوفرة حالياً في الكمبيوتر: `{len(existing_parts)}`\n"
+                    f"💡 اضغط على زر (تجميع الأجزاء الآن) لدمجها تلقائياً فور اكتمال وصول الأجزاء!",
+                    reply_markup=InlineKeyboardMarkup(kb),
+                    parse_mode="Markdown"
+                )
+                return
 
             kb = [
                 [InlineKeyboardButton("🚀 Open on PC Screen", callback_data=f"open_pc:{get_path_id(dest)}")]
@@ -4399,6 +4984,8 @@ def start_bot_thread(token: str, user_dict_ref: dict):
         app.add_handler(CallbackQueryHandler(inline_callback_handler))
         app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
         app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+        app.add_handler(MessageHandler(filters.VIDEO, handle_document))
+        app.add_handler(MessageHandler(filters.AUDIO, handle_document))
         app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
@@ -4429,10 +5016,10 @@ def start_bot_thread(token: str, user_dict_ref: dict):
         try:
             req = HTTPXRequest(
                 connection_pool_size=16,
-                connect_timeout=20.0,
-                read_timeout=40.0,
-                write_timeout=40.0,
-                pool_timeout=15.0,
+                connect_timeout=30.0,
+                read_timeout=120.0,
+                write_timeout=600.0,
+                pool_timeout=30.0,
                 socket_options=[(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
             )
             app = (
@@ -4549,7 +5136,7 @@ def clipboard_monitor_worker():
                                                                 else:
                                                                     await ai.bot.send_document(chat_id=cid, document=fl, caption=f"📋 📁 **Copied File (Synced):** `{fname}` ({sz:.1f} MB)", parse_mode="Markdown")
                                                         else:
-                                                            await ai.bot.send_message(chat_id=cid, text=f"📋 📁 **Large File Copied on PC:**\n`{fp}` ({sz:.1f} MB)", parse_mode="Markdown")
+                                                            await send_large_file_split_telegram(ai.bot, cid, fp, auto_split=True)
                                                     except Exception:
                                                         pass
                                                 asyncio.run_coroutine_threadsafe(_send_file(), bot_loop)
@@ -4594,16 +5181,15 @@ class MasterMiniApp(ctk.CTk):
     def __init__(self, is_silent=False):
         if sys.platform == "win32":
             try:
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PC_Remote_Pro.UniversalHub.v4.1")
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PC_Remote_Pro.UniversalHub.v4.2")
             except Exception:
                 pass
 
         super().__init__()
 
         self.title(f"{APP_NAME} - {APP_VERSION}")
-        self.geometry("380x540")
-        self.minsize(360, 480)
-        self.resizable(True, True)
+        self.geometry("430x650")
+        self.resizable(False, False)
         self.attributes('-topmost', True)
         self.available_update_info = None
 
@@ -4627,21 +5213,9 @@ class MasterMiniApp(ctk.CTk):
             except Exception:
                 pass
 
-        ico_path = os.path.join(BASE_DIR, "PC_Remote_Pro.ico")
-        if not os.path.exists(ico_path):
-            ico_path = os.path.join(getattr(sys, '_MEIPASS', BASE_DIR), "PC_Remote_Pro.ico")
-        if os.path.exists(ico_path):
-            try:
-                self.iconbitmap(ico_path)
-                self.wm_iconbitmap(ico_path)
-                try:
-                    self.iconbitmap(default=ico_path)
-                except Exception:
-                    pass
-                self.after(100, lambda: self.wm_iconbitmap(ico_path))
-                self.after(300, lambda: self.iconbitmap(ico_path))
-            except Exception:
-                pass
+        self.apply_crisp_icons()
+        self.after(50, self.apply_crisp_icons)
+        self.after(200, self.apply_crisp_icons)
 
         if is_silent:
             self.withdraw()
@@ -4650,6 +5224,7 @@ class MasterMiniApp(ctk.CTk):
         self.accounts = self.config.get("accounts", [])
         self.active_account = None
         self._pending_auth_acc = None
+        self._pending_auth_target = "settings"
 
         self.is_token_visible = False
         self.is_chatid_visible = False
@@ -4664,13 +5239,16 @@ class MasterMiniApp(ctk.CTk):
         self.root_scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
         self.root_scroll.pack(fill="both", expand=True, padx=4, pady=2)
 
+        # Separate Distinct Screens
         self.frame_dashboard = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
-        self.frame_editor = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
+        self.frame_editor = ctk.CTkFrame(self.root_scroll, fg_color="transparent")         # Settings ONLY
+        self.frame_transfer_hub = ctk.CTkFrame(self.root_scroll, fg_color="transparent")   # Files Hub & Text Hub
         self.frame_password_set = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
         self.frame_password_auth = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
 
         self.setup_dashboard_ui()
         self.setup_editor_ui()
+        self.setup_transfer_hub_ui()
         self.setup_password_ui()
 
         # Compact Footer
@@ -4698,6 +5276,12 @@ class MasterMiniApp(ctk.CTk):
 
         if self.config.get("autostart", True):
             set_windows_autostart(True)
+
+        if HAS_WINDND:
+            try:
+                windnd.hook_dropfiles(self, func=self.handle_window_dropped_files)
+            except Exception:
+                pass
 
         self.show_dashboard()
 
@@ -4798,7 +5382,6 @@ class MasterMiniApp(ctk.CTk):
         self.btn_add_new = ctk.CTkButton(
             self.frame_dashboard,
             text="➕ Register New Account",
-            width=320,
             height=30,
             fg_color="#28a748",
             hover_color="#218838",
@@ -4806,12 +5389,11 @@ class MasterMiniApp(ctk.CTk):
             font=ctk.CTkFont(size=11, weight="bold"),
             command=self.open_new_account_form
         )
-        self.btn_add_new.pack(pady=4)
+        self.btn_add_new.pack(fill="x", padx=10, pady=4)
 
         self.btn_check_update = ctk.CTkButton(
             self.frame_dashboard,
             text="🔄 Check for Updates",
-            width=320,
             height=28,
             fg_color="#0d6efd",
             hover_color="#0b5ed7",
@@ -4819,13 +5401,12 @@ class MasterMiniApp(ctk.CTk):
             font=ctk.CTkFont(size=11, weight="bold"),
             command=self.trigger_update_check
         )
-        self.btn_check_update.pack(pady=(0, 4))
+        self.btn_check_update.pack(fill="x", padx=10, pady=(0, 4))
 
         # Prominent Download & Install Button (shown when update is available)
         self.btn_download_update = ctk.CTkButton(
             self.frame_dashboard,
             text="🚀 Download & Install Update",
-            width=320,
             height=32,
             fg_color="#28a748",
             hover_color="#218838",
@@ -4836,7 +5417,7 @@ class MasterMiniApp(ctk.CTk):
 
         # Download Progress Container with Live Megabyte Counter
         self.frame_progress = ctk.CTkFrame(self.frame_dashboard, fg_color="transparent")
-        self.progress_bar = ctk.CTkProgressBar(self.frame_progress, width=320, height=12)
+        self.progress_bar = ctk.CTkProgressBar(self.frame_progress, height=12)
         self.progress_bar.set(0.0)
         self.progress_bar.pack(pady=(2, 2))
         self.lbl_progress_mb = ctk.CTkLabel(
@@ -4917,20 +5498,67 @@ class MasterMiniApp(ctk.CTk):
             )
             lbl_stat.pack(anchor="w")
 
-            btn_login = ctk.CTkButton(
-                card,
+            btn_box = ctk.CTkFrame(card, fg_color="transparent")
+            btn_box.pack(side="right", padx=6, pady=4)
+
+            # Files Hub Button: Disabled if account is incomplete until registered!
+            btn_hub = ctk.CTkButton(
+                btn_box,
+                text="Files Hub 📁",
+                width=85,
+                height=26,
+                fg_color="#0d6efd" if is_ready else "#333333",
+                hover_color="#0b5ed7" if is_ready else "#333333",
+                text_color="#FFFFFF" if is_ready else "#777777",
+                state="normal" if is_ready else "disabled",
+                font=ctk.CTkFont(size=10, weight="bold"),
+                command=lambda a=acc: self.open_account_files_hub(a)
+            )
+            btn_hub.pack(side="left", padx=(0, 4))
+
+            # Manage Settings Button: System and credentials settings ONLY
+            btn_manage = ctk.CTkButton(
+                btn_box,
                 text="Manage ⚙️",
-                width=75,
-                height=24,
+                width=80,
+                height=26,
                 fg_color="#333333",
                 hover_color="#444444",
-                font=ctk.CTkFont(size=10),
-                command=lambda a=acc: self.login_to_account(a)
+                text_color="#FFFFFF",
+                font=ctk.CTkFont(size=10, weight="bold"),
+                command=lambda a=acc: self.open_account_settings(a)
             )
-            btn_login.pack(side="right", padx=8, pady=6)
+            btn_manage.pack(side="left")
+
+    def open_account_files_hub(self, acc):
+        if not acc.get("token") or not acc.get("chat_id"):
+            messagebox.showwarning(
+                "Account Incomplete",
+                "Please configure and save the Telegram Bot Token and Chat ID in Manage ⚙️ before accessing Files Hub.",
+                parent=self
+            )
+            return
+
+        self.active_account = acc
+        pwd_hash = acc.get("pwd_hash", "")
+        if pwd_hash:
+            self._pending_auth_target = "hub"
+            self.show_password_auth(acc)
+        else:
+            self.show_transfer_hub(acc)
+
+    def open_account_settings(self, acc):
+        self.active_account = acc
+        pwd_hash = acc.get("pwd_hash", "")
+        if pwd_hash:
+            self._pending_auth_target = "settings"
+            self.show_password_auth(acc)
+        else:
+            self.show_editor(acc)
 
     def show_dashboard(self):
         self.frame_editor.pack_forget()
+        self.frame_transfer_hub.pack_forget()
         self.frame_password_set.pack_forget()
         self.frame_password_auth.pack_forget()
         self.refresh_accounts_dashboard()
@@ -4942,170 +5570,946 @@ class MasterMiniApp(ctk.CTk):
         set_windows_autostart(status)
         save_config(self.accounts, autostart=status)
 
-    # ----------------- Screen 2: Account Editor with Real-Time Diagnostics -----------------
+    # ----------------- Screen 2: Account Settings ONLY (Manage ⚙️) -----------------
     def setup_editor_ui(self):
         self.header_editor = ctk.CTkFrame(self.frame_editor, fg_color="transparent")
-        self.header_editor.pack(fill="x", padx=10, pady=(4, 2))
+        self.header_editor.pack(fill="x", padx=10, pady=(4, 4))
 
         btn_back_dash = ctk.CTkButton(
             self.header_editor,
             text="◀ Back",
-            width=60,
-            height=24,
+            width=70,
+            height=26,
             fg_color="#333333",
             hover_color="#444444",
-            font=ctk.CTkFont(size=10),
+            font=ctk.CTkFont(size=10, weight="bold"),
             command=self.show_dashboard
         )
         btn_back_dash.pack(side="left")
 
         if self.logo_ctk:
             lbl_logo = ctk.CTkLabel(self.header_editor, image=self.logo_ctk, text="")
-            lbl_logo.pack(side="left", padx=(6, 2))
+            lbl_logo.pack(side="left", padx=(8, 2))
 
         self.lbl_edit_title = ctk.CTkLabel(
             self.header_editor,
-            text="Account Credentials",
-            font=ctk.CTkFont(size=12, weight="bold")
+            text="Account Settings",
+            font=ctk.CTkFont(size=13, weight="bold")
         )
         self.lbl_edit_title.pack(side="left", padx=4)
 
-        self.lbl_acc_name = ctk.CTkLabel(self.frame_editor, text="Account Name / Label:", font=ctk.CTkFont(size=10, weight="bold"))
-        self.lbl_acc_name.pack(anchor="w", padx=12, pady=(2, 0))
-        self.entry_acc_name = ctk.CTkEntry(self.frame_editor, width=320, height=26, placeholder_text="e.g. Account 1, Home, Work")
-        self.entry_acc_name.pack(padx=12, pady=(0, 2))
+        # Form Container - Perfectly uniform, straight vertical alignment
+        self.form_card = ctk.CTkFrame(self.frame_editor, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
+        self.form_card.pack(fill="x", padx=10, pady=(4, 6))
 
-        self.lbl_token = ctk.CTkLabel(self.frame_editor, text="Telegram Bot Token:", font=ctk.CTkFont(size=10, weight="bold"))
-        self.lbl_token.pack(anchor="w", padx=12, pady=(2, 0))
+        self.lbl_acc_name = ctk.CTkLabel(self.form_card, text="Account Name / Label:", font=ctk.CTkFont(size=10, weight="bold"))
+        self.lbl_acc_name.pack(anchor="w", padx=14, pady=(10, 2))
+        self.entry_acc_name = ctk.CTkEntry(self.form_card, height=28, placeholder_text="e.g. Account 1, Home, Work")
+        self.entry_acc_name.pack(fill="x", padx=14, pady=(0, 6))
 
-        self.frame_token_row = ctk.CTkFrame(self.frame_editor, fg_color="transparent")
-        self.frame_token_row.pack(fill="x", padx=12, pady=(0, 2))
+        self.lbl_token = ctk.CTkLabel(self.form_card, text="Telegram Bot Token:", font=ctk.CTkFont(size=10, weight="bold"))
+        self.lbl_token.pack(anchor="w", padx=14, pady=(4, 2))
 
-        self.entry_token = ctk.CTkEntry(self.frame_token_row, width=195, height=26, show="*")
-        self.entry_token.pack(side="left", padx=(0, 3))
+        self.frame_token_row = ctk.CTkFrame(self.form_card, fg_color="transparent")
+        self.frame_token_row.pack(fill="x", padx=14, pady=(0, 6))
+
+        self.entry_token = ctk.CTkEntry(self.frame_token_row, height=28, show="*")
+        self.entry_token.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
         self.btn_eye_token = ctk.CTkButton(
-            self.frame_token_row, text="👁️", width=34, height=26,
+            self.frame_token_row, text="👁️", width=34, height=28,
             fg_color="#333333", hover_color="#444444", text_color="#FFFFFF",
             command=self.toggle_token_visibility
         )
         self.btn_eye_token.pack(side="left", padx=(0, 2))
 
         self.btn_paste_token = ctk.CTkButton(
-            self.frame_token_row, text="📋", width=40, height=26,
+            self.frame_token_row, text="📋", width=38, height=28,
             fg_color="#333333", hover_color="#444444", text_color="#FFFFFF",
             command=lambda: self.paste_text_to_entry(self.entry_token)
         )
         self.btn_paste_token.pack(side="left", padx=(0, 2))
 
         self.btn_clear_token = ctk.CTkButton(
-            self.frame_token_row, text="✖", width=26, height=26,
+            self.frame_token_row, text="✖", width=28, height=28,
             fg_color="#c9302c", hover_color="#a02622", text_color="#FFFFFF",
             command=lambda: self.clear_entry(self.entry_token)
         )
         self.btn_clear_token.pack(side="left")
 
-        self.lbl_chatid = ctk.CTkLabel(self.frame_editor, text="Your Chat ID (Numbers only):", font=ctk.CTkFont(size=10, weight="bold"))
-        self.lbl_chatid.pack(anchor="w", padx=12, pady=(2, 0))
+        self.lbl_chatid = ctk.CTkLabel(self.form_card, text="Your Chat ID (Numbers only):", font=ctk.CTkFont(size=10, weight="bold"))
+        self.lbl_chatid.pack(anchor="w", padx=14, pady=(4, 2))
 
-        self.frame_chatid_row = ctk.CTkFrame(self.frame_editor, fg_color="transparent")
-        self.frame_chatid_row.pack(fill="x", padx=12, pady=(0, 2))
+        self.frame_chatid_row = ctk.CTkFrame(self.form_card, fg_color="transparent")
+        self.frame_chatid_row.pack(fill="x", padx=14, pady=(0, 8))
 
-        self.entry_chatid = ctk.CTkEntry(self.frame_chatid_row, width=195, height=26, show="*")
-        self.entry_chatid.pack(side="left", padx=(0, 3))
+        self.entry_chatid = ctk.CTkEntry(self.frame_chatid_row, height=28, show="*")
+        self.entry_chatid.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
         self.btn_eye_chatid = ctk.CTkButton(
-            self.frame_chatid_row, text="👁️", width=34, height=26,
+            self.frame_chatid_row, text="👁️", width=34, height=28,
             fg_color="#333333", hover_color="#444444", text_color="#FFFFFF",
             command=self.toggle_chatid_visibility
         )
         self.btn_eye_chatid.pack(side="left", padx=(0, 2))
 
         self.btn_paste_chatid = ctk.CTkButton(
-            self.frame_chatid_row, text="📋", width=40, height=26,
+            self.frame_chatid_row, text="📋", width=38, height=28,
             fg_color="#333333", hover_color="#444444", text_color="#FFFFFF",
             command=lambda: self.paste_text_to_entry(self.entry_chatid)
         )
         self.btn_paste_chatid.pack(side="left", padx=(0, 2))
 
         self.btn_clear_chatid = ctk.CTkButton(
-            self.frame_chatid_row, text="✖", width=26, height=26,
+            self.frame_chatid_row, text="✖", width=28, height=28,
             fg_color="#c9302c", hover_color="#a02622", text_color="#FFFFFF",
             command=lambda: self.clear_entry(self.entry_chatid)
         )
         self.btn_clear_chatid.pack(side="left")
 
         self.btn_test_conn = ctk.CTkButton(
-            self.frame_editor,
+            self.form_card,
             text="⚡ Test Bot Connection",
-            width=320,
-            height=28,
+            height=30,
             fg_color="#e0a800",
             hover_color="#c69500",
             text_color="#000000",
             font=ctk.CTkFont(size=10, weight="bold"),
             command=self.run_connection_test
         )
-        self.btn_test_conn.pack(pady=3)
+        self.btn_test_conn.pack(fill="x", padx=14, pady=(2, 6))
 
         self.attach_context_menu(self.entry_token)
         self.attach_context_menu(self.entry_chatid)
         self.attach_context_menu(self.entry_acc_name)
 
         self.btn_set_pwd = ctk.CTkButton(
-            self.frame_editor,
+            self.form_card,
             text="🔒 Set / Change Password for this Account",
-            width=320,
-            height=24,
+            height=28,
             fg_color="#333333",
             hover_color="#444444",
             text_color="#DDDDDD",
             font=ctk.CTkFont(size=10),
             command=self.set_account_password
         )
-        self.btn_set_pwd.pack(pady=2)
+        self.btn_set_pwd.pack(fill="x", padx=14, pady=(0, 6))
 
         self.btn_save_acc = ctk.CTkButton(
-            self.frame_editor,
+            self.form_card,
             text="💾 Save & Activate Account",
-            width=320,
-            height=28,
+            height=32,
             fg_color="#1f77b4",
             hover_color="#145a86",
             text_color="#FFFFFF",
             font=ctk.CTkFont(size=11, weight="bold"),
             command=self.save_account_changes
         )
-        self.btn_save_acc.pack(pady=3)
+        self.btn_save_acc.pack(fill="x", padx=14, pady=(0, 12))
 
         self.frame_bottom_actions = ctk.CTkFrame(self.frame_editor, fg_color="transparent")
-        self.frame_bottom_actions.pack(fill="x", padx=12, pady=2)
+        self.frame_bottom_actions.pack(fill="x", padx=10, pady=2)
 
         self.btn_logout = ctk.CTkButton(
             self.frame_bottom_actions,
-            text="🚪 Logout & Lock",
-            width=150,
-            height=26,
+            text="🚪 Back to Dashboard",
+            height=28,
             fg_color="#4a4a4a",
             hover_color="#5a5a5a",
             text_color="#FFFFFF",
             font=ctk.CTkFont(size=10, weight="bold"),
-            command=self.logout_account
+            command=self.show_dashboard
         )
-        self.btn_logout.pack(side="left", padx=(0, 4))
+        self.btn_logout.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
         self.btn_delete = ctk.CTkButton(
             self.frame_bottom_actions,
             text="🗑️ Delete Account",
-            width=150,
-            height=26,
+            height=28,
             fg_color="#c9302c",
             hover_color="#a02622",
             text_color="#FFFFFF",
             font=ctk.CTkFont(size=10),
             command=self.delete_active_account
         )
-        self.btn_delete.pack(side="left")
+        self.btn_delete.pack(side="left", fill="x", expand=True)
+
+    def show_editor(self, acc=None):
+        self.frame_dashboard.pack_forget()
+        self.frame_transfer_hub.pack_forget()
+        self.frame_password_set.pack_forget()
+        self.frame_password_auth.pack_forget()
+        self.active_account = acc
+
+        self.is_token_visible = False
+        self.is_chatid_visible = False
+        self.entry_token.configure(show="*")
+        self.entry_chatid.configure(show="*")
+        self.btn_eye_token.configure(text="👁️")
+        self.btn_eye_chatid.configure(text="👁️")
+
+        self.entry_acc_name.delete(0, "end")
+        self.entry_token.delete(0, "end")
+        self.entry_chatid.delete(0, "end")
+
+        if acc:
+            self.entry_acc_name.insert(0, acc.get("name", ""))
+            self.entry_token.insert(0, acc.get("token", ""))
+            self.entry_chatid.insert(0, str(acc.get("chat_id", "")))
+            self.btn_delete.configure(state="normal")
+            self.lbl_edit_title.configure(text=f"Settings: {acc.get('name', 'Account')}")
+        else:
+            self.entry_acc_name.insert(0, f"Account {len(self.accounts) + 1}")
+            self.btn_delete.configure(state="disabled")
+            self.lbl_edit_title.configure(text="Register New Account")
+
+        self.frame_editor.pack(fill="both", expand=True)
+
+    # ----------------- Screen 3: Files & Text Sharing Hub -----------------
+    def setup_transfer_hub_ui(self):
+        self.header_hub = ctk.CTkFrame(self.frame_transfer_hub, fg_color="transparent")
+        self.header_hub.pack(fill="x", padx=10, pady=(4, 2))
+
+        btn_back = ctk.CTkButton(
+            self.header_hub,
+            text="◀ Back",
+            width=70,
+            height=24,
+            fg_color="#333333",
+            hover_color="#444444",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self.show_dashboard
+        )
+        btn_back.pack(side="left")
+
+        if self.logo_ctk:
+            lbl_logo = ctk.CTkLabel(self.header_hub, image=self.logo_ctk, text="")
+            lbl_logo.pack(side="left", padx=(6, 2))
+
+        self.lbl_hub_title = ctk.CTkLabel(
+            self.header_hub,
+            text="Files & Notes Hub",
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        self.lbl_hub_title.pack(side="left", padx=4)
+
+        # Tab Segment: Files Hub vs Text Messages
+        self.seg_hub_tab = ctk.CTkSegmentedButton(
+            self.frame_transfer_hub,
+            values=["📁 Files Hub", "💬 Text Messages"],
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self.switch_hub_view
+        )
+        self.seg_hub_tab.pack(fill="x", padx=10, pady=(4, 4))
+        self.seg_hub_tab.set("📁 Files Hub")
+
+        self.lbl_hub_status = ctk.CTkLabel(
+            self.frame_transfer_hub,
+            text="🟢 Bot Connected & Ready",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#28a748"
+        )
+        self.lbl_hub_status.pack(anchor="w", padx=12, pady=(0, 3))
+
+        # View 1: Files Hub Subframe
+        self.subframe_file_hub = ctk.CTkFrame(self.frame_transfer_hub, fg_color="transparent")
+
+        # Drop Zone Frame
+        self.drop_frame = ctk.CTkFrame(
+            self.subframe_file_hub,
+            fg_color="#1e1e1e",
+            border_width=2,
+            border_color="#00bcd4",
+            corner_radius=8
+        )
+        self.drop_frame.pack(fill="x", padx=10, pady=(2, 4))
+
+        lbl_drop_icon = ctk.CTkLabel(self.drop_frame, text="📥", font=ctk.CTkFont(size=24))
+        lbl_drop_icon.pack(pady=(6, 0))
+
+        lbl_drop_title = ctk.CTkLabel(
+            self.drop_frame,
+            text="Drag & Drop files here to send to Telegram",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#FFFFFF"
+        )
+        lbl_drop_title.pack(pady=(1, 0))
+
+        lbl_drop_sub = ctk.CTkLabel(
+            self.drop_frame,
+            text="or click Browse Files below to pick from PC 🖱️",
+            font=ctk.CTkFont(size=9),
+            text_color="#aaaaaa"
+        )
+        lbl_drop_sub.pack(pady=(0, 4))
+
+        self.btn_browse_files = ctk.CTkButton(
+            self.drop_frame,
+            text="➕ Browse Files to Send",
+            width=240,
+            height=26,
+            fg_color="#0d6efd",
+            hover_color="#0b5ed7",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self.choose_and_send_files
+        )
+        self.btn_browse_files.pack(pady=(0, 6))
+
+        for w in (self.drop_frame, lbl_drop_icon, lbl_drop_title, lbl_drop_sub):
+            w.bind("<Button-1>", lambda e: self.choose_and_send_files())
+
+        # Checkbox for Auto-Compression and Splitting of files > 50MB
+        self.chk_auto_split = ctk.CTkCheckBox(
+            self.subframe_file_hub,
+            text="⚡ Auto-compress & split large files (>50MB up to 200MB)",
+            font=ctk.CTkFont(size=10, weight="bold")
+        )
+        self.chk_auto_split.pack(anchor="w", padx=12, pady=(2, 2))
+        self.chk_auto_split.select()
+
+        # Upload Progress Bar & Status
+        self.frame_upload_prog = ctk.CTkFrame(self.subframe_file_hub, fg_color="transparent")
+        self.frame_upload_prog.pack(fill="x", padx=10, pady=(1, 2))
+
+        self.upload_progress_bar = ctk.CTkProgressBar(self.frame_upload_prog, width=320, height=8)
+        self.upload_progress_bar.set(0.0)
+        self.upload_progress_bar.pack(fill="x", pady=(2, 2))
+        self.upload_progress_bar.pack_forget()
+
+        self.lbl_upload_status = ctk.CTkLabel(
+            self.frame_upload_prog,
+            text="",
+            font=ctk.CTkFont(size=9, weight="bold"),
+            text_color="#00bcd4"
+        )
+        self.lbl_upload_status.pack(pady=(0, 2))
+
+        # Files Header Toolbar
+        frame_files_header = ctk.CTkFrame(self.subframe_file_hub, fg_color="transparent")
+        frame_files_header.pack(fill="x", padx=10, pady=(4, 2))
+
+        lbl_files_title = ctk.CTkLabel(
+            frame_files_header,
+            text="📁 Received & Shared Files:",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#00bcd4"
+        )
+        lbl_files_title.pack(side="left")
+
+        btn_clear_files = ctk.CTkButton(
+            frame_files_header,
+            text="🗑️ Clear",
+            width=58,
+            height=22,
+            fg_color="#c9302c",
+            hover_color="#a02622",
+            font=ctk.CTkFont(size=9),
+            command=self.clear_files_history_gui
+        )
+        btn_clear_files.pack(side="right", padx=(2, 0))
+
+        btn_open_storage = ctk.CTkButton(
+            frame_files_header,
+            text="📂 Folder",
+            width=58,
+            height=22,
+            fg_color="#333333",
+            hover_color="#444444",
+            font=ctk.CTkFont(size=9),
+            command=self.open_storage_folder
+        )
+        btn_open_storage.pack(side="right", padx=(2, 0))
+
+        btn_refresh_files = ctk.CTkButton(
+            frame_files_header,
+            text="🔄 Refresh",
+            width=62,
+            height=22,
+            fg_color="#333333",
+            hover_color="#444444",
+            font=ctk.CTkFont(size=9),
+            command=self.refresh_file_hub_list
+        )
+        btn_refresh_files.pack(side="right")
+
+        # In-App subtle notification toast for File Hub actions (No popup dialogs!)
+        self.lbl_file_toast = ctk.CTkLabel(
+            self.subframe_file_hub,
+            text="",
+            font=ctk.CTkFont(size=9, weight="bold"),
+            text_color="#28a748"
+        )
+        self.lbl_file_toast.pack(fill="x", padx=12, pady=(0, 2))
+
+        # Scrollable Files Container
+        self.scroll_files_list = ctk.CTkScrollableFrame(self.subframe_file_hub, height=210)
+        self.scroll_files_list.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+
+        # View 2: Text Messages Subframe
+        self.subframe_text_hub = ctk.CTkFrame(self.frame_transfer_hub, fg_color="transparent")
+
+        # Compose row to send note/message to bot
+        frame_compose = ctk.CTkFrame(self.subframe_text_hub, fg_color="#202020", corner_radius=8)
+        frame_compose.pack(fill="x", padx=10, pady=(2, 4))
+
+        lbl_compose_title = ctk.CTkLabel(
+            frame_compose,
+            text="Send Text Note / Message to Telegram:",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#00bcd4"
+        )
+        lbl_compose_title.pack(anchor="w", padx=10, pady=(6, 2))
+
+        compose_row = ctk.CTkFrame(frame_compose, fg_color="transparent")
+        compose_row.pack(fill="x", padx=10, pady=(0, 8))
+
+        self.entry_compose_msg = ctk.CTkEntry(
+            compose_row,
+            placeholder_text="Type a note or message to send to Telegram...",
+            height=30
+        )
+        self.entry_compose_msg.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self.entry_compose_msg.bind("<Return>", lambda e: self.send_text_note_to_bot())
+        self.attach_context_menu(self.entry_compose_msg)
+
+        self.btn_send_note = ctk.CTkButton(
+            compose_row,
+            text="📤 Send",
+            width=70,
+            height=30,
+            fg_color="#0d6efd",
+            hover_color="#0b5ed7",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self.send_text_note_to_bot
+        )
+        self.btn_send_note.pack(side="right")
+
+        # Messages Header Toolbar
+        frame_texts_header = ctk.CTkFrame(self.subframe_text_hub, fg_color="transparent")
+        frame_texts_header.pack(fill="x", padx=10, pady=(4, 2))
+
+        lbl_texts_title = ctk.CTkLabel(
+            frame_texts_header,
+            text="💬 Shared Text Messages (Telegram ↔ PC):",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#00bcd4"
+        )
+        lbl_texts_title.pack(side="left")
+
+        btn_clear_msg = ctk.CTkButton(
+            frame_texts_header,
+            text="🗑️ Clear",
+            width=60,
+            height=22,
+            fg_color="#c9302c",
+            hover_color="#a02622",
+            font=ctk.CTkFont(size=9),
+            command=self.clear_text_messages_gui
+        )
+        btn_clear_msg.pack(side="right", padx=(2, 0))
+
+        btn_refresh_msg = ctk.CTkButton(
+            frame_texts_header,
+            text="🔄 Refresh",
+            width=65,
+            height=22,
+            fg_color="#333333",
+            hover_color="#444444",
+            font=ctk.CTkFont(size=9),
+            command=self.refresh_text_messages_list
+        )
+        btn_refresh_msg.pack(side="right")
+
+        # In-App subtle notification toast for Copy / Status (No popup window!)
+        self.lbl_text_toast = ctk.CTkLabel(
+            self.subframe_text_hub,
+            text="",
+            font=ctk.CTkFont(size=9, weight="bold"),
+            text_color="#28a748"
+        )
+        self.lbl_text_toast.pack(fill="x", padx=12, pady=(0, 2))
+
+        # Scrollable Messages Container
+        self.scroll_messages_list = ctk.CTkScrollableFrame(self.subframe_text_hub, height=230)
+        self.scroll_messages_list.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+
+    def switch_hub_view(self, val):
+        if val == "💬 Text Messages":
+            self.subframe_file_hub.pack_forget()
+            self.subframe_text_hub.pack(fill="both", expand=True)
+            self.refresh_text_messages_list()
+        else:
+            self.subframe_text_hub.pack_forget()
+            self.subframe_file_hub.pack(fill="both", expand=True)
+            self.refresh_file_hub_list()
+
+    def show_transfer_hub(self, acc):
+        self.frame_dashboard.pack_forget()
+        self.frame_editor.pack_forget()
+        self.frame_password_set.pack_forget()
+        self.frame_password_auth.pack_forget()
+
+        self.active_account = acc
+        name = acc.get("name", "Account")
+        is_ready = bool(acc.get("token") and acc.get("chat_id"))
+
+        self.lbl_hub_title.configure(text=f"Account: {name} - Hub")
+        self.lbl_hub_status.configure(
+            text=f"🟢 {name} • Bot Connected & Ready" if is_ready else "⚠️ Bot credentials incomplete",
+            text_color="#28a748" if is_ready else "#e0a800"
+        )
+
+        curr_tab = self.seg_hub_tab.get()
+        self.switch_hub_view(curr_tab)
+        self.frame_transfer_hub.pack(fill="both", expand=True)
+
+    def refresh_file_hub_list(self):
+        for widget in self.scroll_files_list.winfo_children():
+            widget.destroy()
+
+        transfers = load_transfers_history()
+        if not transfers:
+            lbl_empty = ctk.CTkLabel(
+                self.scroll_files_list,
+                text="No files received or sent yet.\nFiles sent from Telegram or dropped here will appear immediately!",
+                text_color="gray",
+                font=ctk.CTkFont(size=10),
+                justify="center"
+            )
+            lbl_empty.pack(pady=30)
+            return
+
+        for item in transfers:
+            fpath = item.get("path", "")
+            fname = item.get("name", os.path.basename(fpath))
+            fsize = item.get("size", 0)
+            direction = item.get("direction", "received")
+            t_epoch = item.get("time", 0)
+
+            time_str = datetime.fromtimestamp(t_epoch).strftime("%Y-%m-%d %H:%M") if t_epoch else ""
+            size_str = format_size_str(fsize)
+            icon = get_file_icon(fname)
+
+            card = ctk.CTkFrame(self.scroll_files_list, fg_color="#242424", corner_radius=6)
+            card.pack(fill="x", padx=2, pady=2)
+
+            left_box = ctk.CTkFrame(card, fg_color="transparent")
+            left_box.pack(side="left", fill="both", expand=True, padx=6, pady=4)
+
+            row1 = ctk.CTkFrame(left_box, fg_color="transparent")
+            row1.pack(fill="x")
+
+            lbl_ic = ctk.CTkLabel(row1, text=icon, font=ctk.CTkFont(size=14))
+            lbl_ic.pack(side="left", padx=(0, 4))
+
+            disp_name = fname if len(fname) <= 28 else (fname[:25] + "...")
+            lbl_fn = ctk.CTkLabel(
+                row1,
+                text=disp_name,
+                font=ctk.CTkFont(size=10, weight="bold"),
+                anchor="w"
+            )
+            lbl_fn.pack(side="left", fill="x", expand=True)
+
+            badge_text = "📥 Received from Telegram" if direction == "received" else ("🧩 Recombined on PC" if direction == "recombined" else "📤 Sent from PC")
+            badge_color = "#00bcd4" if direction == "received" else ("#28a748" if direction == "recombined" else "#e0a800")
+            lbl_dt = ctk.CTkLabel(
+                left_box,
+                text=f"{size_str} • {time_str} • {badge_text}",
+                font=ctk.CTkFont(size=8),
+                text_color=badge_color,
+                anchor="w"
+            )
+            lbl_dt.pack(fill="x")
+
+            actions_box = ctk.CTkFrame(card, fg_color="transparent")
+            actions_box.pack(side="right", padx=4, pady=4)
+
+            is_part = bool(re.search(r'\.part\d+$', fname, re.IGNORECASE))
+            if is_part:
+                btn_recomb = ctk.CTkButton(
+                    actions_box,
+                    text="🧩 Merge",
+                    width=46,
+                    height=22,
+                    fg_color="#17a2b8",
+                    hover_color="#138496",
+                    font=ctk.CTkFont(size=9, weight="bold"),
+                    command=lambda p=fpath: self.do_gui_recombine(p)
+                )
+                btn_recomb.pack(side="left", padx=(0, 2))
+
+            btn_open = ctk.CTkButton(
+                actions_box,
+                text="▶ Open",
+                width=46,
+                height=22,
+                fg_color="#28a748",
+                hover_color="#218838",
+                font=ctk.CTkFont(size=9, weight="bold"),
+                command=lambda p=fpath: self.open_file_safely(p)
+            )
+            btn_open.pack(side="left", padx=(0, 2))
+
+            btn_reveal = ctk.CTkButton(
+                actions_box,
+                text="📂",
+                width=26,
+                height=22,
+                fg_color="#333333",
+                hover_color="#444444",
+                font=ctk.CTkFont(size=9),
+                command=lambda p=fpath: self.reveal_in_explorer(p)
+            )
+            btn_reveal.pack(side="left", padx=(0, 2))
+
+            btn_del = ctk.CTkButton(
+                actions_box,
+                text="✖",
+                width=24,
+                height=22,
+                fg_color="#c9302c",
+                hover_color="#a02622",
+                font=ctk.CTkFont(size=9),
+                command=lambda p=fpath, n=fname: self.delete_file_safely(p, n)
+            )
+            btn_del.pack(side="left")
+
+    def refresh_text_messages_list(self):
+        for widget in self.scroll_messages_list.winfo_children():
+            widget.destroy()
+
+        messages = load_text_messages_history()
+        if not messages:
+            lbl_empty = ctk.CTkLabel(
+                self.scroll_messages_list,
+                text="No text messages shared yet.\nMessages sent from the Telegram bot or PC will appear here!",
+                text_color="gray",
+                font=ctk.CTkFont(size=10),
+                justify="center"
+            )
+            lbl_empty.pack(pady=30)
+            return
+
+        for msg_item in messages:
+            txt = msg_item.get("text", "")
+            direction = msg_item.get("direction", "received")
+            sender = msg_item.get("sender", "User")
+            t_epoch = msg_item.get("time", 0)
+
+            time_str = datetime.fromtimestamp(t_epoch).strftime("%Y-%m-%d %H:%M") if t_epoch else ""
+            is_in = direction == "received"
+            badge_icon = "📥" if is_in else "📤"
+            badge_title = f"{badge_icon} {sender}"
+            badge_color = "#00bcd4" if is_in else "#28a748"
+
+            card = ctk.CTkFrame(self.scroll_messages_list, fg_color="#242424", corner_radius=6)
+            card.pack(fill="x", padx=2, pady=3)
+
+            top_row = ctk.CTkFrame(card, fg_color="transparent")
+            top_row.pack(fill="x", padx=6, pady=(4, 2))
+
+            lbl_badge = ctk.CTkLabel(
+                top_row,
+                text=badge_title,
+                font=ctk.CTkFont(size=9, weight="bold"),
+                text_color=badge_color
+            )
+            lbl_badge.pack(side="left")
+
+            lbl_time = ctk.CTkLabel(
+                top_row,
+                text=time_str,
+                font=ctk.CTkFont(size=8),
+                text_color="#888888"
+            )
+            lbl_time.pack(side="left", padx=(8, 0))
+
+            btn_copy = ctk.CTkButton(
+                top_row,
+                text="📋 Copy",
+                width=62,
+                height=22,
+                fg_color="#333333",
+                hover_color="#444444",
+                font=ctk.CTkFont(size=9, weight="bold")
+            )
+            btn_copy.configure(command=lambda t=txt, b=btn_copy: self.copy_text_to_clipboard(t, b))
+            btn_copy.pack(side="right")
+
+            lbl_msg_content = ctk.CTkLabel(
+                card,
+                text=txt,
+                font=ctk.CTkFont(size=10),
+                text_color="#EEEEEE",
+                wraplength=310,
+                justify="left"
+            )
+            lbl_msg_content.pack(anchor="w", padx=8, pady=(0, 6))
+
+    def copy_text_to_clipboard(self, text: str, btn_widget=None):
+        set_safe_clipboard_text(text)
+        if btn_widget:
+            btn_widget.configure(text="✅ Copied!", fg_color="#28a748", hover_color="#218838")
+            self.after(1600, lambda: btn_widget.configure(text="📋 Copy", fg_color="#333333", hover_color="#444444"))
+        if hasattr(self, 'lbl_text_toast'):
+            self.lbl_text_toast.configure(text="📋 Text copied to clipboard!", text_color="#28a748")
+            self.after(2000, lambda: self.lbl_text_toast.configure(text=""))
+
+    def clear_text_messages_gui(self):
+        ans = messagebox.askyesno("Clear History", "Are you sure you want to clear shared text message history?", parent=self)
+        if ans:
+            clear_text_messages_history()
+            self.refresh_text_messages_list()
+
+    def send_text_note_to_bot(self):
+        if not self.active_account:
+            messagebox.showwarning("Notice", "Please select an account first.", parent=self)
+            return
+
+        token = self.active_account.get("token", "").strip()
+        cid = self.active_account.get("chat_id")
+        if not token or not cid:
+            messagebox.showwarning("Notice", "Account credentials incomplete (Token or Chat ID missing).", parent=self)
+            return
+
+        txt = self.entry_compose_msg.get().strip()
+        if not txt:
+            return
+
+        self.entry_compose_msg.delete(0, "end")
+        self.btn_send_note.configure(state="disabled", text="⏳ Sending...")
+
+        def _worker():
+            ok, msg = send_text_to_telegram_sync_bridge(token, cid, txt)
+            self.after(0, lambda: self._on_note_sent_result(ok, msg))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_note_sent_result(self, ok: bool, msg: str):
+        self.btn_send_note.configure(state="normal", text="📤 Send")
+        if ok:
+            self.refresh_text_messages_list()
+        else:
+            messagebox.showerror("Send Error", f"Could not deliver message to Telegram:\n{msg}", parent=self)
+
+    def on_message_received_event(self, text, sender):
+        if hasattr(self, 'subframe_text_hub') and self.subframe_text_hub.winfo_ismapped():
+            self.refresh_text_messages_list()
+
+    def choose_and_send_files(self):
+        if not self.active_account:
+            messagebox.showwarning("Notice", "Please select an account first before sending files.", parent=self)
+            return
+        token = self.active_account.get("token", "").strip()
+        cid = self.active_account.get("chat_id")
+        if not token or not cid:
+            messagebox.showwarning("Notice", "Account credentials incomplete (Token or Chat ID missing).", parent=self)
+            return
+
+        files = filedialog.askopenfilenames(
+            parent=self,
+            title="Select files to send to Telegram"
+        )
+        if files:
+            self.send_files_async(list(files), self.active_account)
+
+    def handle_window_dropped_files(self, files):
+        file_paths = []
+        for f in files:
+            p = f.decode('utf-8', errors='ignore') if isinstance(f, bytes) else str(f)
+            if os.path.exists(p) and os.path.isfile(p):
+                file_paths.append(p)
+
+        if not file_paths:
+            return
+
+        target_acc = self.active_account
+        if not target_acc and self.accounts:
+            ready = [a for a in self.accounts if a.get("token") and a.get("chat_id")]
+            if ready:
+                target_acc = ready[0]
+
+        if not target_acc or not target_acc.get("token") or not target_acc.get("chat_id"):
+            messagebox.showwarning("Notice", "Please configure and activate an account first to send files.", parent=self)
+            return
+
+        try:
+            self._do_show_window()
+            self.show_transfer_hub(target_acc)
+            self.seg_hub_tab.set("📁 Files Hub")
+            self.switch_hub_view("📁 Files Hub")
+        except Exception:
+            pass
+
+        self.send_files_async(file_paths, target_acc)
+
+    def send_files_async(self, file_paths: list[str], account: dict):
+        if not file_paths or not account:
+            return
+
+        MAX_ALLOWED_BYTES = 200 * 1024 * 1024  # 200 MB Hard Limit
+        valid_files = []
+        for fp in file_paths:
+            if not os.path.exists(fp):
+                continue
+            sz = os.path.getsize(fp)
+            if sz > MAX_ALLOWED_BYTES:
+                fname = os.path.basename(fp)
+                sz_mb = sz / (1024 * 1024)
+                messagebox.showerror(
+                    "File Too Large (>200 MB)",
+                    f"File '{fname}' is {sz_mb:.1f} MB, which exceeds the 200 MB maximum limit.\n\nFiles larger than 200 MB cannot be sent via the Telegram bot.",
+                    parent=self
+                )
+                continue
+            valid_files.append(fp)
+
+        if not valid_files:
+            return
+
+        self.upload_progress_bar.pack(before=self.lbl_upload_status, fill="x", pady=(2, 2))
+        self.upload_progress_bar.set(0.0)
+        self.lbl_upload_status.configure(text=f"⏳ Preparing {len(valid_files)} file(s) for sending...", text_color="#00bcd4")
+
+        def _worker():
+            token = account.get("token", "").strip()
+            cid = account.get("chat_id")
+            auto_split = bool(self.chk_auto_split.get()) if hasattr(self, 'chk_auto_split') else True
+
+            successful_count = 0
+            failed_items = []
+
+            for idx, fp in enumerate(valid_files):
+                fname = os.path.basename(fp)
+                def _prog(pct, status_text):
+                    overall_pct = (idx + pct) / len(valid_files)
+                    self.after(0, lambda p=overall_pct, s=status_text: self._update_upload_progress(p, s))
+
+                try:
+                    ok, msg = send_file_to_telegram_sync_bridge(token, cid, fp, auto_split=auto_split, progress_callback=_prog)
+                    if ok:
+                        successful_count += 1
+                    else:
+                        failed_items.append((fname, msg))
+                except Exception as e:
+                    failed_items.append((fname, str(e)))
+
+            self.after(0, lambda: self._on_all_uploads_finished(successful_count, failed_items, len(valid_files)))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _update_upload_progress(self, pct: float, text: str):
+        self.upload_progress_bar.set(pct)
+        self.lbl_upload_status.configure(text=text, text_color="#00bcd4")
+
+    def _on_all_uploads_finished(self, successful_count: int, failed_items: list, total: int):
+        self.refresh_file_hub_list()
+        if not failed_items:
+            self.upload_progress_bar.set(1.0)
+            self.lbl_upload_status.configure(text=f"✅ All {total} file(s) delivered to Telegram successfully!", text_color="#28a748")
+            self.after(6000, lambda: self.lbl_upload_status.configure(text=""))
+        elif successful_count == 0:
+            self.upload_progress_bar.set(0.0)
+            err_details = "\n".join([f"• {name}: {err}" for name, err in failed_items])
+            self.lbl_upload_status.configure(text="❌ Failed to deliver file(s) to Telegram.", text_color="#dc3545")
+            messagebox.showerror("Upload Error", f"Could not deliver file(s) to Telegram:\n\n{err_details}", parent=self)
+        else:
+            self.upload_progress_bar.set(1.0)
+            err_details = "\n".join([f"• {name}: {err}" for name, err in failed_items])
+            self.lbl_upload_status.configure(text=f"⚠️ {successful_count}/{total} files sent, {len(failed_items)} failed.", text_color="#e0a800")
+            messagebox.showwarning("Partial Upload", f"Some files could not be delivered:\n\n{err_details}", parent=self)
+
+    def on_file_received_event(self, file_name, file_path):
+        if hasattr(self, 'subframe_file_hub') and self.subframe_file_hub.winfo_ismapped():
+            self.refresh_file_hub_list()
+
+    def do_gui_recombine(self, part_path):
+        if not os.path.exists(part_path):
+            messagebox.showerror("Error", "Split part file does not exist.", parent=self)
+            return
+        storage_dir = os.path.dirname(part_path)
+        part_name = os.path.basename(part_path)
+        m = re.match(r'^(.*?)\.part\d+$', part_name, re.IGNORECASE)
+        base_name = m.group(1) if m else part_name
+
+        ok, res = recombine_split_parts(storage_dir, base_name)
+        if ok:
+            messagebox.showinfo("Merged Successfully", f"🎉 File parts recombined successfully:\n{res}", parent=self)
+            self.refresh_file_hub_list()
+        else:
+            messagebox.showerror("Merge Error", f"Failed to merge file parts:\n{res}", parent=self)
+
+    def open_file_safely(self, path):
+        if not os.path.exists(path):
+            messagebox.showerror("Error", "File does not exist on disk.", parent=self)
+            self.refresh_file_hub_list()
+            return
+        try:
+            os.startfile(path)
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open file:\n{e}", parent=self)
+
+    def reveal_in_explorer(self, path):
+        if not os.path.exists(path):
+            messagebox.showerror("Error", "File does not exist on disk.", parent=self)
+            return
+        try:
+            subprocess.Popen(f'explorer /select,"{os.path.abspath(path)}"')
+        except Exception:
+            try:
+                os.startfile(os.path.dirname(os.path.abspath(path)))
+            except Exception:
+                pass
+
+    def delete_file_safely(self, path, name):
+        ans = messagebox.askyesno(
+            "Remove Record",
+            f"Are you sure you want to remove:\n'{name}'\nfrom the transfer history?",
+            parent=self
+        )
+        if ans:
+            remove_transfer_record(path)
+            # If the file is inside the downloads folder, optionally prompt to delete from disk
+            dl_folder = os.path.abspath(get_download_folder())
+            if os.path.exists(path) and os.path.abspath(path).startswith(dl_folder):
+                del_file = messagebox.askyesno(
+                    "Delete File",
+                    f"Do you also want to permanently delete the physical file from disk?\n\n{name}",
+                    parent=self
+                )
+                if del_file:
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+            self.refresh_file_hub_list()
+            if hasattr(self, 'lbl_file_toast'):
+                self.lbl_file_toast.configure(text=f"🗑️ Removed '{name}' from history")
+                self.after(2000, lambda: self.lbl_file_toast.configure(text=""))
+
+    def clear_files_history_gui(self):
+        transfers = load_transfers_history()
+        if not transfers:
+            if hasattr(self, 'lbl_file_toast'):
+                self.lbl_file_toast.configure(text="ℹ️ Transfer history is already empty.")
+                self.after(2000, lambda: self.lbl_file_toast.configure(text=""))
+            return
+
+        ans = messagebox.askyesno(
+            "Clear Transfer History",
+            "Are you sure you want to clear all sent and received transfer history?",
+            parent=self
+        )
+        if ans:
+            clear_transfers_history()
+            self.refresh_file_hub_list()
+            if hasattr(self, 'lbl_file_toast'):
+                self.lbl_file_toast.configure(text="✅ All sent & received history cleared successfully!")
+                self.after(2500, lambda: self.lbl_file_toast.configure(text=""))
+
+    def open_new_account_form(self):
+        self.show_editor(acc=None)
 
     def toggle_token_visibility(self):
         self.is_token_visible = not self.is_token_visible
@@ -5117,9 +6521,9 @@ class MasterMiniApp(ctk.CTk):
         self.entry_chatid.configure(show="" if self.is_chatid_visible else "*")
         self.btn_eye_chatid.configure(text="🔒" if self.is_chatid_visible else "👁️")
 
-    # ----------------- Screen 3 & 4: Integrated In-App Password Management -----------------
+    # ----------------- Screen 4 & 5: Integrated In-App Password Management -----------------
     def setup_password_ui(self):
-        # Frame 3: Set / Change Password View
+        # Frame 4: Set / Change Password View
         self.header_pwd_set = ctk.CTkFrame(self.frame_password_set, fg_color="transparent")
         self.header_pwd_set.pack(fill="x", padx=10, pady=(4, 2))
 
@@ -5167,20 +6571,20 @@ class MasterMiniApp(ctk.CTk):
         lbl_new.pack(anchor="w", padx=12, pady=(2, 0))
 
         frame_new_row = ctk.CTkFrame(self.frame_password_set, fg_color="transparent")
-        frame_new_row.pack(fill="x", padx=12, pady=(0, 2))
+        frame_new_row.pack(fill="x", padx=12, pady=(0, 4))
 
-        self.entry_pwd_new = ctk.CTkEntry(frame_new_row, width=235, height=26, show="*")
-        self.entry_pwd_new.pack(side="left", padx=(0, 3))
+        self.entry_pwd_new = ctk.CTkEntry(frame_new_row, height=28, show="*")
+        self.entry_pwd_new.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
         self.btn_eye_pwd_new = ctk.CTkButton(
-            frame_new_row, text="👁️", width=34, height=26,
+            frame_new_row, text="👁️", width=34, height=28,
             fg_color="#333333", hover_color="#444444", text_color="#FFFFFF",
             command=self.toggle_pwd_new_visibility
         )
         self.btn_eye_pwd_new.pack(side="left", padx=(0, 2))
 
         btn_clr_new = ctk.CTkButton(
-            frame_new_row, text="✖", width=26, height=26,
+            frame_new_row, text="✖", width=28, height=28,
             fg_color="#c9302c", hover_color="#a02622", text_color="#FFFFFF",
             command=lambda: self.clear_entry(self.entry_pwd_new)
         )
@@ -5193,56 +6597,54 @@ class MasterMiniApp(ctk.CTk):
         frame_confirm_row = ctk.CTkFrame(self.frame_password_set, fg_color="transparent")
         frame_confirm_row.pack(fill="x", padx=12, pady=(0, 4))
 
-        self.entry_pwd_confirm = ctk.CTkEntry(frame_confirm_row, width=235, height=26, show="*")
-        self.entry_pwd_confirm.pack(side="left", padx=(0, 3))
+        self.entry_pwd_confirm = ctk.CTkEntry(frame_confirm_row, height=28, show="*")
+        self.entry_pwd_confirm.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
         self.btn_eye_pwd_confirm = ctk.CTkButton(
-            frame_confirm_row, text="👁️", width=34, height=26,
+            frame_confirm_row, text="👁️", width=34, height=28,
             fg_color="#333333", hover_color="#444444", text_color="#FFFFFF",
             command=self.toggle_pwd_confirm_visibility
         )
         self.btn_eye_pwd_confirm.pack(side="left", padx=(0, 2))
 
         btn_clr_confirm = ctk.CTkButton(
-            frame_confirm_row, text="✖", width=26, height=26,
+            frame_confirm_row, text="✖", width=28, height=28,
             fg_color="#c9302c", hover_color="#a02622", text_color="#FFFFFF",
             command=lambda: self.clear_entry(self.entry_pwd_confirm)
         )
         btn_clr_confirm.pack(side="left")
 
         self.lbl_pwd_msg = ctk.CTkLabel(self.frame_password_set, text="", font=ctk.CTkFont(size=10, weight="bold"))
-        self.lbl_pwd_msg.pack(padx=12, pady=(2, 4))
+        self.lbl_pwd_msg.pack(fill="x", padx=12, pady=(2, 4))
 
         self.btn_save_password = ctk.CTkButton(
             self.frame_password_set,
             text="💾 Save & Apply Password",
-            width=320,
-            height=28,
+            height=30,
             fg_color="#28a748",
             hover_color="#218838",
             text_color="#FFFFFF",
             font=ctk.CTkFont(size=11, weight="bold"),
             command=self.save_new_password
         )
-        self.btn_save_password.pack(pady=3)
+        self.btn_save_password.pack(fill="x", padx=12, pady=3)
 
         self.btn_remove_password = ctk.CTkButton(
             self.frame_password_set,
             text="🔓 Remove Password Protection",
-            width=320,
-            height=26,
+            height=28,
             fg_color="#c9302c",
             hover_color="#a02622",
             text_color="#FFFFFF",
             font=ctk.CTkFont(size=10),
             command=self.remove_existing_password
         )
-        self.btn_remove_password.pack(pady=3)
+        self.btn_remove_password.pack(fill="x", padx=12, pady=3)
 
         self.attach_context_menu(self.entry_pwd_new)
         self.attach_context_menu(self.entry_pwd_confirm)
 
-        # Frame 4: In-App Authentication to Unlock Account
+        # Frame 5: In-App Authentication to Unlock Account
         self.header_pwd_auth = ctk.CTkFrame(self.frame_password_auth, fg_color="transparent")
         self.header_pwd_auth.pack(fill="x", padx=10, pady=(4, 2))
 
@@ -5277,17 +6679,17 @@ class MasterMiniApp(ctk.CTk):
 
         self.lbl_auth_acc_name = ctk.CTkLabel(
             card_auth,
-            text="Enter password to manage this account",
+            text="Enter password to access this account",
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color="#00bcd4"
         )
         self.lbl_auth_acc_name.pack(pady=(0, 6))
 
         frame_auth_input = ctk.CTkFrame(card_auth, fg_color="transparent")
-        frame_auth_input.pack(fill="x", padx=16, pady=(0, 4))
+        frame_auth_input.pack(fill="x", padx=16, pady=(0, 6))
 
-        self.entry_auth_pwd = ctk.CTkEntry(frame_auth_input, width=220, height=28, show="*", placeholder_text="Enter account password")
-        self.entry_auth_pwd.pack(side="left", padx=(0, 4))
+        self.entry_auth_pwd = ctk.CTkEntry(frame_auth_input, height=28, show="*", placeholder_text="Enter account password")
+        self.entry_auth_pwd.pack(side="left", fill="x", expand=True, padx=(0, 4))
         self.entry_auth_pwd.bind("<Return>", lambda e: self.do_unlock_account())
 
         self.btn_eye_auth = ctk.CTkButton(
@@ -5298,12 +6700,11 @@ class MasterMiniApp(ctk.CTk):
         self.btn_eye_auth.pack(side="left")
 
         self.lbl_auth_err = ctk.CTkLabel(card_auth, text="", font=ctk.CTkFont(size=10, weight="bold"), text_color="#dc3545")
-        self.lbl_auth_err.pack(pady=(2, 6))
+        self.lbl_auth_err.pack(fill="x", padx=16, pady=(2, 6))
 
         self.btn_unlock = ctk.CTkButton(
             card_auth,
             text="🔓 Unlock Account",
-            width=260,
             height=30,
             fg_color="#1f77b4",
             hover_color="#145a86",
@@ -5311,7 +6712,7 @@ class MasterMiniApp(ctk.CTk):
             font=ctk.CTkFont(size=11, weight="bold"),
             command=self.do_unlock_account
         )
-        self.btn_unlock.pack(pady=(0, 10))
+        self.btn_unlock.pack(fill="x", padx=16, pady=(0, 12))
 
         self.attach_context_menu(self.entry_auth_pwd)
 
@@ -5337,6 +6738,7 @@ class MasterMiniApp(ctk.CTk):
 
         self.frame_dashboard.pack_forget()
         self.frame_editor.pack_forget()
+        self.frame_transfer_hub.pack_forget()
         self.frame_password_auth.pack_forget()
 
         acc_name = self.active_account.get("name", "Account")
@@ -5395,6 +6797,7 @@ class MasterMiniApp(ctk.CTk):
     def show_password_auth(self, acc):
         self.frame_dashboard.pack_forget()
         self.frame_editor.pack_forget()
+        self.frame_transfer_hub.pack_forget()
         self.frame_password_set.pack_forget()
 
         self._pending_auth_acc = acc
@@ -5422,14 +6825,31 @@ class MasterMiniApp(ctk.CTk):
         if h == expected:
             acc = self._pending_auth_acc
             self._pending_auth_acc = None
-            self.show_editor(acc)
+            self.active_account = acc
+            if getattr(self, "_pending_auth_target", "settings") == "hub":
+                self.show_transfer_hub(acc)
+            else:
+                self.show_editor(acc)
         else:
-            self.lbl_auth_err.configure(text="❌ Incorrect password. Try again.")
-            self.entry_auth_pwd.delete(0, "end")
+            self.lbl_auth_err.configure(text="❌ Incorrect password. Please try again.")
 
     def run_connection_test(self):
         token = self.entry_token.get().strip()
-        chat_id = self.entry_chatid.get().strip()
+        chat_id_str = self.entry_chatid.get().strip()
+
+        if not token:
+            messagebox.showerror("Validation Error", "Please enter Telegram Bot Token first.", parent=self)
+            return
+        if not chat_id_str:
+            messagebox.showerror("Validation Error", "Please enter Chat ID first.", parent=self)
+            return
+
+        try:
+            chat_id = int(chat_id_str)
+        except ValueError:
+            messagebox.showerror("Validation Error", "Chat ID must contain numbers only.", parent=self)
+            return
+
         self.btn_test_conn.configure(state="disabled", text="⏳ Testing connection...")
         self.update_idletasks()
 
@@ -5440,44 +6860,6 @@ class MasterMiniApp(ctk.CTk):
             messagebox.showinfo("Connection Success", msg, parent=self)
         else:
             messagebox.showerror("Connection Diagnostic", msg, parent=self)
-
-    def show_editor(self, acc=None):
-        self.frame_dashboard.pack_forget()
-        self.frame_password_set.pack_forget()
-        self.frame_password_auth.pack_forget()
-        self.active_account = acc
-
-        self.is_token_visible = False
-        self.is_chatid_visible = False
-        self.entry_token.configure(show="*")
-        self.entry_chatid.configure(show="*")
-        self.btn_eye_token.configure(text="👁️")
-        self.btn_eye_chatid.configure(text="👁️")
-
-        self.entry_acc_name.delete(0, "end")
-        self.entry_token.delete(0, "end")
-        self.entry_chatid.delete(0, "end")
-
-        if acc:
-            self.entry_acc_name.insert(0, acc.get("name", ""))
-            self.entry_token.insert(0, acc.get("token", ""))
-            self.entry_chatid.insert(0, str(acc.get("chat_id", "")))
-            self.btn_delete.configure(state="normal")
-        else:
-            self.entry_acc_name.insert(0, f"Account {len(self.accounts) + 1}")
-            self.btn_delete.configure(state="disabled")
-
-        self.frame_editor.pack(fill="both", expand=True)
-
-    def open_new_account_form(self):
-        self.show_editor(acc=None)
-
-    def login_to_account(self, acc):
-        pwd_hash = acc.get("pwd_hash", "")
-        if pwd_hash:
-            self.show_password_auth(acc)
-        else:
-            self.show_editor(acc)
 
     def set_account_password(self):
         if not self.active_account:
@@ -5633,12 +7015,12 @@ class MasterMiniApp(ctk.CTk):
             except Exception:
                 pass
 
-        menu.add_command(label="📋 Paste (لصق)", command=_do_paste)
-        menu.add_command(label="📄 Copy (نسخ)", command=_do_copy)
-        menu.add_command(label="✂️ Cut (قص)", command=_do_cut)
+        menu.add_command(label="📋 Paste", command=_do_paste)
+        menu.add_command(label="📄 Copy", command=_do_copy)
+        menu.add_command(label="✂️ Cut", command=_do_cut)
         menu.add_separator()
-        menu.add_command(label="🔘 Select All (تحديد الكل)", command=_do_select_all)
-        menu.add_command(label="✖ Clear (مسح)", command=_do_clear)
+        menu.add_command(label="🔘 Select All", command=_do_select_all)
+        menu.add_command(label="✖ Clear", command=_do_clear)
 
         def _popup(event):
             try:
@@ -5781,7 +7163,7 @@ class MasterMiniApp(ctk.CTk):
         try:
             self.deiconify()
             self.state("normal")
-            if not self.frame_dashboard.winfo_ismapped() and not self.frame_editor.winfo_ismapped() and not self.frame_password_set.winfo_ismapped() and not self.frame_password_auth.winfo_ismapped():
+            if not self.frame_dashboard.winfo_ismapped() and not self.frame_editor.winfo_ismapped() and not self.frame_transfer_hub.winfo_ismapped() and not self.frame_password_set.winfo_ismapped() and not self.frame_password_auth.winfo_ismapped():
                 self.show_dashboard()
             elif self.frame_dashboard.winfo_ismapped():
                 self.refresh_accounts_dashboard()
@@ -5790,6 +7172,7 @@ class MasterMiniApp(ctk.CTk):
             self.after(100, lambda: self.attributes('-topmost', False))
             self.focus_force()
             self.update_idletasks()
+            self.apply_crisp_icons()
         except Exception:
             pass
 
@@ -5854,31 +7237,24 @@ class MasterMiniApp(ctk.CTk):
             return
 
         down_url = asset["browser_download_url"]
-        fname = asset.get("name", "PC_Remote_Pro_Setup.exe")
+        fname = asset.get("name", f"PC_Remote_Pro_Setup_{tag}.exe")
+        out_file = os.path.join(tempfile.gettempdir(), fname)
 
+        self.btn_download_update.configure(state="disabled", text="⏳ Downloading...")
         self.btn_check_update.configure(state="disabled")
-        self.btn_download_update.configure(state="disabled", text=f"⏳ Downloading {tag}...")
-
-        # Display progress bar and megabyte counter
-        self.frame_progress.pack(before=self.lbl_dash_status, pady=4)
+        self.frame_progress.pack(before=self.lbl_dash_status, pady=(0, 4))
         self.progress_bar.set(0.0)
-        self.lbl_progress_mb.configure(text="Connecting to GitHub download server...", text_color="#00bcd4")
-        self.lbl_dash_status.configure(text=f"Downloading {tag}...", text_color="#00bcd4")
-
-        def _progress_cb(downloaded_bytes, total_bytes):
-            mb_down = downloaded_bytes / (1024 * 1024)
-            if total_bytes and total_bytes > 0:
-                pct = downloaded_bytes / total_bytes
-                mb_total = total_bytes / (1024 * 1024)
-                text = f"Downloading: {mb_down:.1f} MB / {mb_total:.1f} MB ({int(pct * 100)}%)"
-            else:
-                pct = 0.5
-                text = f"Downloading: {mb_down:.1f} MB"
-            self.after(0, lambda: self._update_progress_ui(pct, text))
+        self.lbl_progress_mb.configure(text="Connecting to GitHub...", text_color="#00bcd4")
 
         def _download_worker():
-            ok_down, out_file = download_github_release_asset(down_url, fname, progress_callback=_progress_cb)
-            if ok_down and os.path.exists(out_file):
+            def _prog(pct, downloaded_bytes, total_bytes):
+                dl_mb = downloaded_bytes / (1024 * 1024)
+                tot_mb = total_bytes / (1024 * 1024) if total_bytes > 0 else 0
+                txt = f"{dl_mb:.1f} MB / {tot_mb:.1f} MB ({pct*100:.1f}%)" if tot_mb > 0 else f"{dl_mb:.1f} MB downloaded"
+                self.after(0, lambda p=pct, t=txt: self._update_progress_ui(p, t))
+
+            ok = download_update_binary_with_progress(down_url, out_file, _prog)
+            if ok:
                 self.after(0, lambda: self._prompt_install_update(out_file, tag))
             else:
                 self.after(0, lambda: self._on_download_error(out_file))
@@ -5924,6 +7300,61 @@ class MasterMiniApp(ctk.CTk):
         self.lbl_dash_status.configure(text=f"Version: {APP_VERSION} • Download Failed", text_color="#dc3545")
         tkinter.messagebox.showerror("Download Error", f"Failed to download update:\n{err_msg}", parent=self)
 
+    def apply_crisp_icons(self):
+        """Applies ultra-sharp, native multi-resolution icons for Windows Taskbar, Alt+Tab, and Window Header."""
+        ico_path = os.path.join(BASE_DIR, "PC_Remote_Pro.ico")
+        if not os.path.exists(ico_path):
+            ico_path = os.path.join(getattr(sys, '_MEIPASS', BASE_DIR), "PC_Remote_Pro.ico")
+        png_path = os.path.join(BASE_DIR, "PC_Remote_Pro.png")
+        if not os.path.exists(png_path):
+            png_path = os.path.join(getattr(sys, '_MEIPASS', BASE_DIR), "PC_Remote_Pro.png")
+
+        # 1. High-Res Tkinter wm_iconphoto (delivers 32-bit RGBA icons directly to window manager)
+        if os.path.exists(png_path):
+            try:
+                from PIL import ImageTk
+                raw_p = Image.open(png_path)
+                self._photo_256 = ImageTk.PhotoImage(raw_p.resize((256, 256), Image.Resampling.LANCZOS))
+                self._photo_48 = ImageTk.PhotoImage(raw_p.resize((48, 48), Image.Resampling.LANCZOS))
+                self._photo_32 = ImageTk.PhotoImage(raw_p.resize((32, 32), Image.Resampling.LANCZOS))
+                self._photo_16 = ImageTk.PhotoImage(raw_p.resize((16, 16), Image.Resampling.LANCZOS))
+                self.wm_iconphoto(True, self._photo_256, self._photo_48, self._photo_32, self._photo_16)
+            except Exception:
+                pass
+
+        # 2. Tkinter iconbitmap
+        if os.path.exists(ico_path):
+            try:
+                self.iconbitmap(ico_path)
+            except Exception:
+                pass
+
+        # 3. Direct Win32 WM_SETICON on top-level frame HWND (ensures razor-sharp Windows 11 taskbar & Alt+Tab icon)
+        if sys.platform == "win32" and os.path.exists(ico_path):
+            try:
+                user32 = ctypes.windll.user32
+                hwnd = user32.GetAncestor(self.winfo_id(), 2) or self.winfo_id()
+                LR_LOADFROMFILE = 0x00000010
+                IMAGE_ICON = 1
+                WM_SETICON = 0x0080
+                ICON_SMALL = 0
+                ICON_BIG = 1
+
+                cx_big = user32.GetSystemMetrics(11) # SM_CXICON
+                cy_big = user32.GetSystemMetrics(12) # SM_CYICON
+                cx_sm = user32.GetSystemMetrics(49)  # SM_CXSMICON
+                cy_sm = user32.GetSystemMetrics(50)  # SM_CYSMICON
+
+                hicon_big = user32.LoadImageW(None, os.path.abspath(ico_path), IMAGE_ICON, cx_big, cy_big, LR_LOADFROMFILE)
+                hicon_sm = user32.LoadImageW(None, os.path.abspath(ico_path), IMAGE_ICON, cx_sm, cy_sm, LR_LOADFROMFILE)
+
+                if hicon_big:
+                    user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon_big)
+                if hicon_sm:
+                    user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon_sm)
+            except Exception:
+                pass
+
     def setup_tray(self):
         png_path = os.path.join(BASE_DIR, "PC_Remote_Pro.png")
         if not os.path.exists(png_path):
@@ -5938,6 +7369,7 @@ class MasterMiniApp(ctk.CTk):
             try:
                 raw_img = Image.open(target_img_path)
                 img = raw_img.resize((64, 64), Image.Resampling.LANCZOS).convert("RGBA")
+                img = img.filter(ImageFilter.UnsharpMask(radius=1.2, percent=130))
             except Exception:
                 img = None
 

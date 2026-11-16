@@ -2,7 +2,7 @@
 ; Installs the application to C:\Program Files\PC Remote Pro
 
 #define MyAppName "PC Remote Pro"
-#define MyAppVersion "4.1.0"
+#define MyAppVersion "4.2.0"
 #define MyAppPublisher "Mohammed Shaheed"
 #define MyAppExeName "PC_Remote_Pro.exe"
 #define MyAppAssocName MyAppName + " File"
@@ -20,7 +20,7 @@ DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 ; Output Configuration
 OutputDir=Output
-OutputBaseFilename=PC_Remote_Pro_Setup_v4.1
+OutputBaseFilename=PC_Remote_Pro_Setup_v4.2
 SetupIconFile=PC_Remote_Pro.ico
 ; Compression Settings
 Compression=lzma2/ultra64
@@ -33,7 +33,7 @@ PrivilegesRequired=admin
 PrivilegesRequiredOverridesAllowed=dialog
 CloseApplications=yes
 CloseApplicationsFilter=PC_Remote_Pro.exe
-VersionInfoVersion=4.1.0.0
+VersionInfoVersion=4.2.0.0
 VersionInfoCompany=Mohammed Shaheed
 VersionInfoDescription=PC Remote Pro - Universal Remote Control Hub
 VersionInfoCopyright=Copyright (C) 2026 Mohammed Shaheed
@@ -44,7 +44,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
-Name: "autostart"; Description: "تشغيل البرنامج تلقائياً في الخلفية عند بدء تشغيل الكمبيوتر (Run automatically on Windows startup)"; GroupDescription: "إعدادات التشغيل التلقائي (Startup Settings):"
+Name: "autostart"; Description: "Run automatically on Windows startup (Silent Boot)"; GroupDescription: "Startup Settings:"
 
 [InstallDelete]
 Type: files; Name: "{app}\PC_Remote_Pro.ico"

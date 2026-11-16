@@ -7,6 +7,12 @@ hiddenimports = []
 tmp_ret = collect_all('customtkinter')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
+try:
+    tmp_ret_windnd = collect_all('windnd')
+    datas += tmp_ret_windnd[0]; binaries += tmp_ret_windnd[1]; hiddenimports += tmp_ret_windnd[2]
+except Exception:
+    pass
+
 
 a = Analysis(
     ['bot_control.py'],
