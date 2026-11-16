@@ -1,13 +1,13 @@
 <div align="center">
 
-<img src="assets/banner.png" alt="PC Remote Pro v4.1 Banner" width="100%" />
+<img src="assets/banner.png" alt="PC Remote Pro v4.2 Banner" width="100%" />
 
-# ⚡ PC Remote Pro (v4.1)
+# ⚡ PC Remote Pro (v4.2 Final)
 
 ### *Enterprise-Grade Autonomous Telegram PC Remote Management & Security Hub*
-**تحكم ذكي، إدارة شاملة للحاسبة عن بُعد، نظام حماية وصيانة ذاتي للشبكة عبر تيليجرام**
+**تحكم ذكي، إدارة شاملة للحاسبة عن بُعد، نظام حماية وصيانة ذاتي للشبكة ونقل ملفات حتى 200MB عبر تيليجرام**
 
-[![Release](https://img.shields.io/badge/Release-v4.1.0-00d2ff?style=for-the-badge&logo=github)](https://github.com/moshraheem-sudo/PC_Remote_Pro/releases)
+[![Release](https://img.shields.io/badge/Release-v4.2.0-00d2ff?style=for-the-badge&logo=github)](https://github.com/moshraheem-sudo/PC_Remote_Pro/releases)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011%20(64--Bit)-0078d4?style=for-the-badge&logo=windows)](https://microsoft.com/windows)
 [![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.14-ffd343?style=for-the-badge&logo=python)](https://python.org)
 [![Telegram](https://img.shields.io/badge/Telegram%20Bot%20API-PTB%20v21+-26A5E4?style=for-the-badge&logo=telegram)](https://core.telegram.org/bots/api)
@@ -15,12 +15,12 @@
 
 <p align="center">
   <a href="#-overview--نظرة-عامة">Overview</a> •
-  <a href="#-whats-new-in-v41--الجديد-في-الإصدار-41">What's New in v4.1</a> •
+  <a href="#-whats-new-in-v42--الجديد-في-الإصدار-42">What's New in v4.2</a> •
+  <a href="#-interactive-setup-guide--دليل-الضبط-والتعليمات">Setup Guide</a> •
   <a href="#-key-features--المميزات-الرئيسية">Key Features</a> •
   <a href="#-system-architecture--المعمارية">Architecture</a> •
   <a href="#-installation--setup--طريقة-التثبيت-والتشغيل">Installation</a> •
   <a href="#-bot-commands--أوامر-البوت">Bot Commands</a> •
-  <a href="#-security-guard--نظام-الأمان">Security Guard</a> •
   <a href="#-author--المطور">Author</a>
 </p>
 
@@ -30,28 +30,47 @@
 
 ## 📖 Overview | نظرة عامة
 
-**PC Remote Pro v4.1** هو تطبيق ويندوز متقدم مصمم للتحكم الكامل بجهاز الكمبيوتر وإدارته عن بُعد من أي مكان في العالم عبر بوت تيليجرام مشفر وخاص. يدمج التطبيق بين **أدوات إدارة النظام (DevOps & SysAdmin)**، **أنظمة المراقبة البصرية الحية (Surveillance)**، و**الأنظمة الذكية للصيانة الذاتية للشبكة (Autonomous Network Healing)** مع تشغيل خفيف ومستقر في خلفية النظام (System Tray قرب الساعة).
+**PC Remote Pro v4.2** هو تطبيق ويندوز متقدم مصمم للتحكم الكامل بجهاز الكمبيوتر وإدارته عن بُعد من أي مكان في العالم عبر بوت تيليجرام مشفر وخاص. يدمج التطبيق بين **أدوات إدارة النظام (DevOps & SysAdmin)**، **أنظمة المراقبة البصرية الحية (Surveillance)**، و**الأنظمة الذكية لمشاركة الملفات الضخمة حتى 200 ميجابايت مع التجزئة والدمج التلقائي**، مع تشغيل خفيف ومستقر في خلفية النظام (System Tray قرب الساعة).
 
-**PC Remote Pro v4.1** is an enterprise-grade Windows background service and interactive remote administration dashboard powered by Telegram Bot API. It enables seamless bi-directional PC control, automated network healing, custom download storage folder routing, active watchdog monitoring, in-app password vault, terminal execution, live screen capture, and continuous hardware surveillance directly from your smartphone or desktop.
+**PC Remote Pro v4.2** is an enterprise-grade Windows background service and interactive remote administration dashboard powered by Telegram Bot API. It enables seamless bi-directional PC control, automated network healing, 200MB large-file transfer with streaming and auto-recombination, built-in interactive setup guide with direct links to [@BotFather](https://t.me/BotFather) and [@userinfobot](https://t.me/userinfobot), separate Files & Settings Hubs, in-app password vault, live screen capture, and continuous hardware surveillance directly from your smartphone or desktop.
 
 ---
 
-## 🌟 What's New in v4.1 | الجديد في الإصدار 4.1
+## 🌟 What's New in v4.2 | الجديد في الإصدار 4.2
 
 <div align="center">
-  <img src="assets/features_showcase.png" alt="Features Overview Matrix v4.1" width="100%" />
+  <img src="assets/features_showcase.png" alt="Features Overview Matrix v4.2" width="100%" />
 </div>
 
-| الميزة الجديدة في v4.1 | الوصف التقني الفائق | الحالة |
+| الميزة الجديدة في v4.2 | الوصف التقني الفائق | الحالة |
 | :--- | :--- | :---: |
-| **📋 Universal Clipboard & Keycode Intercept** | حل جذري لمشكلة اللصق والنسخ (`Ctrl+V`) مع لوحة المفاتيح العربية والإنجليزية عبر قراءة `CF_UNICODETEXT` والتقاط الـ Virtual Keycode (VK_V=86). | **مكتمل ومفعل** ✅ |
-| **📁 Configurable File Storage Folder** | عرض مسار مجلد حفظ الملفات المستلمة في الواجهة الرئيسية مع إمكانية تغييره وفتحه مباشرة وتوجيه كافة تنزيلات البوت إليه. | **مكتمل ومفعل** ✅ |
-| **🔔 Instant File Reception Alerts** | إشعار سطح المكتب ونغمة تنبيه صوتية (`MessageBeep`) فور استلام البوت لأي صورة أو تسجيل صوتي أو مستند وحفظه بالكمبيوتر. | **مكتمل ومفعل** ✅ |
-| **🔐 In-App Embedded Password Center** | تصميم شاشات تعيين وتأكيد والتحقق من كلمة السر داخل إطار التطبيق نفسه وبأزرار رجوع وسلاسة تامة دون نوافذ منبثقة مزعجة. | **مكتمل ومفعل** ✅ |
-| **🕒 24/7 Tray Watchdog & Real Ping** | تشغيل آمن ومستمر قرب الساعة مع فحص دوري فعلي للإنترنت واتصال البوت الحي وتحديث أيقونة وشريط المهام ديناميكياً. | **مكتمل ومفعل** ✅ |
-| **💿 Inno Setup Full C: Drive Installer** | مثبت احترافي متكامل يثبت البرنامج في `C:\Program Files\PC Remote Pro` مع اختصارات سطح المكتب والتشغيل التلقائي مع الويندوز. | **مكتمل ومفعل** ✅ |
-| **🔽 Collapsible Mobile Menu** | طي وإخفاء قائمة أزرار التيليجرام بضغطة واحدة لتوفير مساحة شاشة الهاتف ومنع تداخل لوحة المفاتيح. | **مكتمل ومفعل** ✅ |
-| **🖥️ PC Applications Explorer** | فحص واكتشاف كافة برامج الكمبيوتر المثبتة والبحث الفوري عنها وتشغيلها عن بعد. | **مكتمل ومفعل** ✅ |
+| **ℹ️ Interactive In-App Setup Guide** | شاشة إرشادات متكاملة بنقاط واضحة بالإنجليزية مع أزرار مباشرة لفتح [@BotFather](https://t.me/BotFather) و [@userinfobot](https://t.me/userinfobot) في تيليجرام لجلب التوكن والـ Chat ID فوراً. | **مكتمل ومفعل** ✅ |
+| **📁 Separated Files Hub & Real-time Text Hub** | فصل شاشة الإعدادات (`Manage ⚙️`) عن مركز الملفات والرسائل (`Files Hub 📁`) مع دعم السحب والإفلات (Drag & Drop) والنسخ اللحظي إلى الحافظة. | **مكتمل ومفعل** ✅ |
+| **⚡ 200MB File Transfers with Auto-Split** | رفع الحد الأقصى للملفات إلى 200 ميجابايت مع تجزئة الملفات الكبيرة تلقائياً وضغطها ودعم البث المباشر حتى 600 ثانية لمنع انتهاء المهلة. | **مكتمل ومفعل** ✅ |
+| **🗑️ Transfer History Management** | زر حذف سجل الملفات المرسلة والمستلمة (`🗑️ Clear`) مع إشعار مدمج داخل التطبيق دون نوافذ منبثقة مزعجة. | **مكتمل ومفعل** ✅ |
+| **🎨 Ultra-Crisp Windows 11 Taskbar Icon** | أيقونة أصلية متعددة الدقات (9 طبقات حتى 256x256) مع ربط مباشر عبر Win32 API (`SendMessageW`) لعرض حاد وواضح 100% على شاشات High-DPI. | **مكتمل ومفعل** ✅ |
+| **🔒 Isolated AppData Storage** | حفظ آمن لمعلومات الحسابات والتخزين المؤقت في `%LOCALAPPDATA%\PCRemotePro` لعزل الإعدادات ومنع تضارب البيانات عند نقل المجلد. | **مكتمل ومفعل** ✅ |
+
+---
+
+## 🔑 Interactive Setup Guide | دليل الضبط السريع
+
+<div align="center">
+  <table>
+    <tr>
+      <td align="center"><img src="IMAGE/1.png" width="220px"/><br/><b>Dashboard (Main)</b></td>
+      <td align="center"><img src="IMAGE/2.png" width="220px"/><br/><b>Account Settings</b></td>
+      <td align="center"><img src="IMAGE/3.png" width="220px"/><br/><b>Files Hub (200MB)</b></td>
+      <td align="center"><img src="IMAGE/4.png" width="220px"/><br/><b>Text Messages</b></td>
+    </tr>
+  </table>
+</div>
+
+To connect your PC to Telegram, you need two credentials:
+1. **Telegram Bot Token**: Created via [@BotFather](https://t.me/BotFather) (`/newbot`).
+2. **Personal Chat ID**: Retrieved via [@userinfobot](https://t.me/userinfobot) (send `/start`).
+
+Inside the application, click the **`ℹ️ INFO`** button in the dashboard or **`ℹ️ Setup Guide & Info`** to read the full step-by-step instructions and click direct links to open both bots in Telegram.
 
 ---
 

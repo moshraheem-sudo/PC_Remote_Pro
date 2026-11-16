@@ -5245,11 +5245,13 @@ class MasterMiniApp(ctk.CTk):
         self.frame_transfer_hub = ctk.CTkFrame(self.root_scroll, fg_color="transparent")   # Files Hub & Text Hub
         self.frame_password_set = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
         self.frame_password_auth = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
+        self.frame_info_guide = ctk.CTkFrame(self.root_scroll, fg_color="transparent")      # Info & Instructions Guide
 
         self.setup_dashboard_ui()
         self.setup_editor_ui()
         self.setup_transfer_hub_ui()
         self.setup_password_ui()
+        self.setup_info_guide_ui()
 
         # Compact Footer
         self.lbl_footer = ctk.CTkLabel(
@@ -5288,13 +5290,16 @@ class MasterMiniApp(ctk.CTk):
     # ----------------- Screen 1: Dashboard UI -----------------
     def setup_dashboard_ui(self):
         self.header_dash = ctk.CTkFrame(self.frame_dashboard, fg_color="transparent")
-        self.header_dash.pack(pady=(4, 2))
+        self.header_dash.pack(fill="x", padx=10, pady=(4, 2))
+
+        left_dash_header = ctk.CTkFrame(self.header_dash, fg_color="transparent")
+        left_dash_header.pack(side="left")
 
         if self.logo_ctk:
-            self.lbl_dash_logo = ctk.CTkLabel(self.header_dash, image=self.logo_ctk, text="")
+            self.lbl_dash_logo = ctk.CTkLabel(left_dash_header, image=self.logo_ctk, text="")
             self.lbl_dash_logo.pack(side="left", padx=(0, 8))
 
-        title_box = ctk.CTkFrame(self.header_dash, fg_color="transparent")
+        title_box = ctk.CTkFrame(left_dash_header, fg_color="transparent")
         title_box.pack(side="left")
 
         self.lbl_dash_title = ctk.CTkLabel(
@@ -5311,6 +5316,19 @@ class MasterMiniApp(ctk.CTk):
             text_color="#00bcd4"
         )
         self.lbl_dash_subtitle.pack(anchor="w")
+
+        self.btn_header_info = ctk.CTkButton(
+            self.header_dash,
+            text="ℹ️ INFO",
+            width=68,
+            height=26,
+            fg_color="#17a2b8",
+            hover_color="#138496",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self.show_info_guide
+        )
+        self.btn_header_info.pack(side="right", padx=(0, 2))
 
         self.scroll_accounts = ctk.CTkScrollableFrame(self.frame_dashboard, width=330, height=190)
         self.scroll_accounts.pack(padx=6, pady=4, fill="both", expand=True)
@@ -5389,19 +5407,34 @@ class MasterMiniApp(ctk.CTk):
             font=ctk.CTkFont(size=11, weight="bold"),
             command=self.open_new_account_form
         )
-        self.btn_add_new.pack(fill="x", padx=10, pady=4)
+        self.btn_add_new.pack(fill="x", padx=10, pady=(4, 3))
+
+        row_actions = ctk.CTkFrame(self.frame_dashboard, fg_color="transparent")
+        row_actions.pack(fill="x", padx=10, pady=(0, 4))
+
+        self.btn_guide_row = ctk.CTkButton(
+            row_actions,
+            text="ℹ️ Setup Guide & Info",
+            height=28,
+            fg_color="#17a2b8",
+            hover_color="#138496",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self.show_info_guide
+        )
+        self.btn_guide_row.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
         self.btn_check_update = ctk.CTkButton(
-            self.frame_dashboard,
-            text="🔄 Check for Updates",
+            row_actions,
+            text="🔄 Check Updates",
             height=28,
             fg_color="#0d6efd",
             hover_color="#0b5ed7",
             text_color="#FFFFFF",
-            font=ctk.CTkFont(size=11, weight="bold"),
+            font=ctk.CTkFont(size=10, weight="bold"),
             command=self.trigger_update_check
         )
-        self.btn_check_update.pack(fill="x", padx=10, pady=(0, 4))
+        self.btn_check_update.pack(side="left", fill="x", expand=True)
 
         # Prominent Download & Install Button (shown when update is available)
         self.btn_download_update = ctk.CTkButton(
@@ -5561,6 +5594,7 @@ class MasterMiniApp(ctk.CTk):
         self.frame_transfer_hub.pack_forget()
         self.frame_password_set.pack_forget()
         self.frame_password_auth.pack_forget()
+        self.frame_info_guide.pack_forget()
         self.refresh_accounts_dashboard()
         self.lbl_storage_path.configure(text=get_download_folder())
         self.frame_dashboard.pack(fill="both", expand=True)
@@ -5667,6 +5701,18 @@ class MasterMiniApp(ctk.CTk):
         )
         self.btn_clear_chatid.pack(side="left")
 
+        self.btn_help_tokens = ctk.CTkButton(
+            self.form_card,
+            text="ℹ️ How to get Bot Token & Chat ID? (Click for Guide)",
+            height=22,
+            fg_color="transparent",
+            hover_color="#2b2b2b",
+            text_color="#00bcd4",
+            font=ctk.CTkFont(size=9, underline=True),
+            command=self.show_info_guide
+        )
+        self.btn_help_tokens.pack(anchor="w", padx=14, pady=(0, 6))
+
         self.btn_test_conn = ctk.CTkButton(
             self.form_card,
             text="⚡ Test Bot Connection",
@@ -5739,6 +5785,7 @@ class MasterMiniApp(ctk.CTk):
         self.frame_transfer_hub.pack_forget()
         self.frame_password_set.pack_forget()
         self.frame_password_auth.pack_forget()
+        self.frame_info_guide.pack_forget()
         self.active_account = acc
 
         self.is_token_visible = False
@@ -6048,6 +6095,7 @@ class MasterMiniApp(ctk.CTk):
         self.frame_editor.pack_forget()
         self.frame_password_set.pack_forget()
         self.frame_password_auth.pack_forget()
+        self.frame_info_guide.pack_forget()
 
         self.active_account = acc
         name = acc.get("name", "Account")
@@ -6740,6 +6788,7 @@ class MasterMiniApp(ctk.CTk):
         self.frame_editor.pack_forget()
         self.frame_transfer_hub.pack_forget()
         self.frame_password_auth.pack_forget()
+        self.frame_info_guide.pack_forget()
 
         acc_name = self.active_account.get("name", "Account")
         has_pwd = bool(self.active_account.get("pwd_hash"))
@@ -6799,6 +6848,7 @@ class MasterMiniApp(ctk.CTk):
         self.frame_editor.pack_forget()
         self.frame_transfer_hub.pack_forget()
         self.frame_password_set.pack_forget()
+        self.frame_info_guide.pack_forget()
 
         self._pending_auth_acc = acc
         self.lbl_auth_acc_name.configure(text=f"Account: '{acc.get('name', 'Account')}'")
@@ -6832,6 +6882,237 @@ class MasterMiniApp(ctk.CTk):
                 self.show_editor(acc)
         else:
             self.lbl_auth_err.configure(text="❌ Incorrect password. Please try again.")
+
+    def show_info_guide(self):
+        """Displays the complete Setup & Information Guide screen."""
+        self.frame_dashboard.pack_forget()
+        self.frame_editor.pack_forget()
+        self.frame_transfer_hub.pack_forget()
+        self.frame_password_set.pack_forget()
+        self.frame_password_auth.pack_forget()
+        self.frame_info_guide.pack(fill="both", expand=True)
+
+    # ----------------- Screen 6: Information & Setup Guide (INFO) -----------------
+    def setup_info_guide_ui(self):
+        # Header toolbar
+        self.header_info = ctk.CTkFrame(self.frame_info_guide, fg_color="transparent")
+        self.header_info.pack(fill="x", padx=10, pady=(4, 4))
+
+        btn_back = ctk.CTkButton(
+            self.header_info,
+            text="◀ Back",
+            width=70,
+            height=26,
+            fg_color="#333333",
+            hover_color="#444444",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self.show_dashboard
+        )
+        btn_back.pack(side="left")
+
+        if self.logo_ctk:
+            lbl_logo = ctk.CTkLabel(self.header_info, image=self.logo_ctk, text="")
+            lbl_logo.pack(side="left", padx=8)
+
+        lbl_title = ctk.CTkLabel(
+            self.header_info,
+            text="Setup Guide & Info",
+            font=ctk.CTkFont(size=13, weight="bold")
+        )
+        lbl_title.pack(side="left", padx=4)
+
+        # Scrollable container for guide content
+        scroll_guide = ctk.CTkScrollableFrame(self.frame_info_guide, height=520)
+        scroll_guide.pack(fill="both", expand=True, padx=6, pady=(0, 4))
+
+        # --- Card 1: Key Requirements (@BotFather & @userinfobot) ---
+        card_tokens = ctk.CTkFrame(scroll_guide, fg_color="#18202b", corner_radius=8, border_width=1, border_color="#00bcd4")
+        card_tokens.pack(fill="x", padx=4, pady=(2, 8))
+
+        lbl_tokens_header = ctk.CTkLabel(
+            card_tokens,
+            text="🔑 How to Get Bot Token & Chat ID",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#00bcd4"
+        )
+        lbl_tokens_header.pack(anchor="w", padx=12, pady=(8, 4))
+
+        lbl_tokens_desc = ctk.CTkLabel(
+            card_tokens,
+            text="To connect your PC to Telegram, you need two items:\n"
+                 "1. Bot API Token (generated by @BotFather)\n"
+                 "2. Your Personal Chat ID (retrieved from @userinfobot)\n\n"
+                 "Click the direct Telegram buttons below to open each bot instantly:",
+            font=ctk.CTkFont(size=10),
+            justify="left",
+            wraplength=340
+        )
+        lbl_tokens_desc.pack(anchor="w", padx=12, pady=(0, 8))
+
+        # Subcard A: @BotFather
+        box_bf = ctk.CTkFrame(card_tokens, fg_color="#121820", corner_radius=6, border_width=1, border_color="#2b3b4f")
+        box_bf.pack(fill="x", padx=10, pady=(0, 8))
+
+        lbl_bf_title = ctk.CTkLabel(
+            box_bf,
+            text="1️⃣ Step 1: Get Bot Token (@BotFather)",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#229ED9"
+        )
+        lbl_bf_title.pack(anchor="w", padx=8, pady=(6, 2))
+
+        lbl_bf_steps = ctk.CTkLabel(
+            box_bf,
+            text="• Open @BotFather in Telegram.\n"
+                 "• Send: /newbot\n"
+                 "• Enter a Name for your bot (e.g. My PC Remote).\n"
+                 "• Choose a unique Username ending with 'bot' (e.g. MyPC_Remote_bot).\n"
+                 "• Copy the HTTP API Token provided (format: 123456:ABC-DEF...).",
+            font=ctk.CTkFont(size=9),
+            justify="left",
+            wraplength=330
+        )
+        lbl_bf_steps.pack(anchor="w", padx=8, pady=(0, 6))
+
+        btn_open_botfather = ctk.CTkButton(
+            box_bf,
+            text="🤖 Open @BotFather in Telegram ↗",
+            height=28,
+            fg_color="#229ED9",
+            hover_color="#1C85B8",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=lambda: webbrowser.open("https://t.me/BotFather")
+        )
+        btn_open_botfather.pack(fill="x", padx=8, pady=(0, 8))
+
+        # Subcard B: @userinfobot
+        box_ui = ctk.CTkFrame(card_tokens, fg_color="#121820", corner_radius=6, border_width=1, border_color="#2b3b4f")
+        box_ui.pack(fill="x", padx=10, pady=(0, 8))
+
+        lbl_ui_title = ctk.CTkLabel(
+            box_ui,
+            text="2️⃣ Step 2: Get Your Chat ID (@userinfobot)",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#229ED9"
+        )
+        lbl_ui_title.pack(anchor="w", padx=8, pady=(6, 2))
+
+        lbl_ui_steps = ctk.CTkLabel(
+            box_ui,
+            text="• Open @userinfobot in Telegram.\n"
+                 "• Click Start or send any message.\n"
+                 "• The bot replies with your profile info.\n"
+                 "• Copy the numbers next to 'Id:' (e.g. 123456789).\n"
+                 "• Only this numeric ID will have authorization to control your PC.",
+            font=ctk.CTkFont(size=9),
+            justify="left",
+            wraplength=330
+        )
+        lbl_ui_steps.pack(anchor="w", padx=8, pady=(0, 6))
+
+        btn_open_userinfobot = ctk.CTkButton(
+            box_ui,
+            text="🆔 Open @userinfobot in Telegram ↗",
+            height=28,
+            fg_color="#229ED9",
+            hover_color="#1C85B8",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=lambda: webbrowser.open("https://t.me/userinfobot")
+        )
+        btn_open_userinfobot.pack(fill="x", padx=8, pady=(0, 8))
+
+        # --- Card 2: Activation Steps ---
+        card_reg = ctk.CTkFrame(scroll_guide, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
+        card_reg.pack(fill="x", padx=4, pady=(0, 8))
+
+        lbl_reg_header = ctk.CTkLabel(
+            card_reg,
+            text="⚙️ Step 3: Activating Account in PC Remote Pro",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#28a748"
+        )
+        lbl_reg_header.pack(anchor="w", padx=12, pady=(8, 4))
+
+        lbl_reg_text = ctk.CTkLabel(
+            card_reg,
+            text="1. On Main Dashboard, click '➕ Register New Account'.\n"
+                 "2. Enter an Account Name (e.g. 'My Work PC').\n"
+                 "3. Paste your Bot Token and enter your numeric Chat ID.\n"
+                 "4. Click '⚡ Test Bot Connection' to verify bot status.\n"
+                 "5. Click '💾 Save & Activate Account'.\n"
+                 "6. Your bot starts immediately in the background!",
+            font=ctk.CTkFont(size=9),
+            justify="left",
+            wraplength=340
+        )
+        lbl_reg_text.pack(anchor="w", padx=12, pady=(0, 8))
+
+        # --- Card 3: Features & Telegram Bot Usage ---
+        card_features = ctk.CTkFrame(scroll_guide, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
+        card_features.pack(fill="x", padx=4, pady=(0, 8))
+
+        lbl_feat_header = ctk.CTkLabel(
+            card_features,
+            text="📱 How to Use Telegram Remote Features",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#00bcd4"
+        )
+        lbl_feat_header.pack(anchor="w", padx=12, pady=(8, 4))
+
+        lbl_feat_text = ctk.CTkLabel(
+            card_features,
+            text="• Send /start in Telegram to open the interactive button menu.\n"
+                 "• 📂 Files & Storage: Browse disks, desktop, downloads & search files.\n"
+                 "• 📤 File Sharing: Drag & drop files on PC or send from Telegram (up to 200MB, auto-split & recombine).\n"
+                 "• ⚡ Power Controls: Shutdown, reboot, lock screen, sleep mode.\n"
+                 "• 📸 Screen Capture: Live screenshot sent straight to your chat.\n"
+                 "• 📷 Webcam Snapshot: Capture photo from PC webcam.\n"
+                 "• 🎵 YouTube Player: Search and play videos directly on PC speakers.\n"
+                 "• 💬 Text Messages: Share text notes instantly between PC & Telegram with 1-click clipboard copy.",
+            font=ctk.CTkFont(size=9),
+            justify="left",
+            wraplength=340
+        )
+        lbl_feat_text.pack(anchor="w", padx=12, pady=(0, 8))
+
+        # --- Card 4: Security Notes ---
+        card_sec = ctk.CTkFrame(scroll_guide, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
+        card_sec.pack(fill="x", padx=4, pady=(0, 8))
+
+        lbl_sec_header = ctk.CTkLabel(
+            card_sec,
+            text="🛡️ Security & Privacy Notes",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#ffc107"
+        )
+        lbl_sec_header.pack(anchor="w", padx=12, pady=(8, 4))
+
+        lbl_sec_text = ctk.CTkLabel(
+            card_sec,
+            text="• Strict Authorization: Any Telegram user other than your Chat ID is blocked instantly.\n"
+                 "• Local Data Isolation: Credentials stay saved in %LOCALAPPDATA% on this PC.\n"
+                 "• Optional PIN: Lock account settings with a password inside 'Manage ⚙️'.",
+            font=ctk.CTkFont(size=9),
+            justify="left",
+            wraplength=340
+        )
+        lbl_sec_text.pack(anchor="w", padx=12, pady=(0, 8))
+
+        # Bottom Return Button
+        btn_bottom_back = ctk.CTkButton(
+            scroll_guide,
+            text="◀ Back to Dashboard",
+            height=30,
+            fg_color="#333333",
+            hover_color="#444444",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self.show_dashboard
+        )
+        btn_bottom_back.pack(fill="x", padx=10, pady=(4, 12))
 
     def run_connection_test(self):
         token = self.entry_token.get().strip()
@@ -7163,7 +7444,7 @@ class MasterMiniApp(ctk.CTk):
         try:
             self.deiconify()
             self.state("normal")
-            if not self.frame_dashboard.winfo_ismapped() and not self.frame_editor.winfo_ismapped() and not self.frame_transfer_hub.winfo_ismapped() and not self.frame_password_set.winfo_ismapped() and not self.frame_password_auth.winfo_ismapped():
+            if not self.frame_dashboard.winfo_ismapped() and not self.frame_editor.winfo_ismapped() and not self.frame_transfer_hub.winfo_ismapped() and not self.frame_password_set.winfo_ismapped() and not self.frame_password_auth.winfo_ismapped() and not self.frame_info_guide.winfo_ismapped():
                 self.show_dashboard()
             elif self.frame_dashboard.winfo_ismapped():
                 self.refresh_accounts_dashboard()
