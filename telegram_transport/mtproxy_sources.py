@@ -23,9 +23,12 @@ DEFAULT_SOURCES = [
 ]
 
 class MTProxySources:
-    def __init__(self, cache_dir: str):
-        self.cache_dir = cache_dir
-        self.cache_file = os.path.join(cache_dir, "mtproxy_cache.json")
+    def __init__(self, cache_dir: Optional[str] = None):
+        if not cache_dir:
+            cache_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "PCRemotePro")
+        self.cache_dir = os.path.abspath(cache_dir)
+        os.makedirs(self.cache_dir, exist_ok=True)
+        self.cache_file = os.path.join(self.cache_dir, "mtproxy_cache.json")
         self.proxies: list[dict] = []
         self.last_fetch_time: float = 0.0
         self.is_fetching: bool = False

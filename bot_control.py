@@ -141,8 +141,8 @@ except Exception as e:
     print(f"[Warning] Failed to load telegram_transport: {e}")
 
 TELEGRAM_CONNECTION_SETTINGS = {
-    "api_id": "94575",
-    "api_hash": "a3406de8d171714214e1e32a2f23e239",
+    "api_id": "2040",
+    "api_hash": "b18441a1ff607e10a989891a5462e627",
     "mode": "direct",
     "enable_mtproto": False,
     "auto_proxy": True
@@ -3385,7 +3385,7 @@ def get_menu_keyboard(menu_type="main", lang="en"):
         return ReplyKeyboardMarkup([[B("btn_screen", lang), B("btn_back", lang)]], **common_options)
 
 # ----------------- Real-Time Diagnostic Test Function -----------------
-def test_telegram_connection(token: str, chat_id_str: str, use_mtproto: bool = False, api_id: int = 94575, api_hash: str = "a3406de8d171714214e1e32a2f23e239") -> tuple[bool, str]:
+def test_telegram_connection(token: str, chat_id_str: str, use_mtproto: bool = False, api_id: int = 2040, api_hash: str = "b18441a1ff607e10a989891a5462e627") -> tuple[bool, str]:
     token = token.strip()
     chat_id_str = str(chat_id_str).strip()
 
@@ -3396,6 +3396,19 @@ def test_telegram_connection(token: str, chat_id_str: str, use_mtproto: bool = F
         chat_id = int(chat_id_str) if chat_id_str else None
     except ValueError:
         return False, "❌ Chat ID must contain digits only."
+
+    try:
+        aid = int(api_id)
+        if aid in (0, 94575):
+            aid = 2040
+    except Exception:
+        aid = 2040
+    api_id = aid
+
+    ahash = str(api_hash or "").strip()
+    if not ahash or ahash == "a3406de8d171714214e1e32a2f23e239":
+        ahash = "b18441a1ff607e10a989891a5462e627"
+    api_hash = ahash
 
     if use_mtproto:
         # Test using TDLib MTProto Connection
@@ -3497,12 +3510,24 @@ Application is ready for remote control."""
         return False, f"❌ Connection Error: {e}"
 
 # ----------------- Native TDLib MTProto Bot Engine -----------------
-def start_tdlib_bot_thread(token: str, user_dict_ref: dict, api_id: int = 94575, api_hash: str = "a3406de8d171714214e1e32a2f23e239"):
+def start_tdlib_bot_thread(token: str, user_dict_ref: dict, api_id: int = 2040, api_hash: str = "b18441a1ff607e10a989891a5462e627"):
     """
     Runs a Telegram Bot instance over official TDLib (tdjson.dll) and MTProto proxy.
     Bypasses ISP blocks on api.telegram.org (e.g. in Iraq and restricted regions).
     """
     token_clean = token.strip()
+    try:
+        aid = int(api_id)
+        if aid in (0, 94575):
+            aid = 2040
+    except Exception:
+        aid = 2040
+    api_id = aid
+
+    ahash = str(api_hash or "").strip()
+    if not ahash or ahash == "a3406de8d171714214e1e32a2f23e239":
+        ahash = "b18441a1ff607e10a989891a5462e627"
+    api_hash = ahash
     db_hash = hashlib.sha256(token_clean.encode()).hexdigest()[:12]
     tdlib_db_dir = os.path.join(DATA_DIR, f"tdlib_db_{db_hash}")
     os.makedirs(tdlib_db_dir, exist_ok=True)
@@ -6778,7 +6803,7 @@ class MasterMiniApp(ctk.CTk):
 
         self.lbl_api_id = ctk.CTkLabel(self.frame_mtproto_card, text="Telegram API ID:", font=ctk.CTkFont(size=10, weight="bold"))
         self.lbl_api_id.pack(anchor="w", padx=14, pady=(2, 2))
-        self.entry_api_id = ctk.CTkEntry(self.frame_mtproto_card, height=28, placeholder_text="94575")
+        self.entry_api_id = ctk.CTkEntry(self.frame_mtproto_card, height=28, placeholder_text="2040")
         self.entry_api_id.pack(fill="x", padx=14, pady=(0, 6))
 
         self.lbl_api_hash = ctk.CTkLabel(self.frame_mtproto_card, text="Telegram API Hash:", font=ctk.CTkFont(size=10, weight="bold"))
@@ -6787,7 +6812,7 @@ class MasterMiniApp(ctk.CTk):
         frame_hash_row = ctk.CTkFrame(self.frame_mtproto_card, fg_color="transparent")
         frame_hash_row.pack(fill="x", padx=14, pady=(0, 6))
 
-        self.entry_api_hash = ctk.CTkEntry(frame_hash_row, height=28, show="*", placeholder_text="a3406de8d171714214e1e32a2f23e239")
+        self.entry_api_hash = ctk.CTkEntry(frame_hash_row, height=28, show="*", placeholder_text="b18441a1ff607e10a989891a5462e627")
         self.entry_api_hash.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
         self.is_apihash_visible = False
@@ -6925,8 +6950,8 @@ class MasterMiniApp(ctk.CTk):
 
         # Populate MTProto card settings
         tg_conn = TELEGRAM_CONNECTION_SETTINGS
-        api_id_val = acc.get("api_id") if acc and acc.get("api_id") else tg_conn.get("api_id", "94575")
-        api_hash_val = acc.get("api_hash") if acc and acc.get("api_hash") else tg_conn.get("api_hash", "a3406de8d171714214e1e32a2f23e239")
+        api_id_val = acc.get("api_id") if acc and acc.get("api_id") else tg_conn.get("api_id", "2040")
+        api_hash_val = acc.get("api_hash") if acc and acc.get("api_hash") else tg_conn.get("api_hash", "b18441a1ff607e10a989891a5462e627")
         mode_val = acc.get("connection_mode") if acc and acc.get("connection_mode") else tg_conn.get("mode", "direct")
         enable_mt = acc.get("use_mtproto") if acc and "use_mtproto" in acc else tg_conn.get("enable_mtproto", False)
         auto_px = acc.get("auto_proxy") if acc and "auto_proxy" in acc else tg_conn.get("auto_proxy", True)
@@ -8824,8 +8849,8 @@ class MasterMiniApp(ctk.CTk):
 
     def save_telegram_connection_settings(self):
         is_mt_mode = (self.opt_conn_mode.get() == "MTProto via TDLib (Censorship Bypass)" or bool(self.chk_enable_mtproto.get()))
-        api_id_in = self.entry_api_id.get().strip() or "94575"
-        api_hash_in = self.entry_api_hash.get().strip() or "a3406de8d171714214e1e32a2f23e239"
+        api_id_in = self.entry_api_id.get().strip() or "2040"
+        api_hash_in = self.entry_api_hash.get().strip() or "b18441a1ff607e10a989891a5462e627"
         auto_px_in = bool(self.chk_auto_proxy.get())
 
         TELEGRAM_CONNECTION_SETTINGS["mode"] = "mtproto" if is_mt_mode else "direct"
@@ -8932,8 +8957,8 @@ class MasterMiniApp(ctk.CTk):
             return
 
         is_mt = (self.opt_conn_mode.get() == "MTProto via TDLib (Censorship Bypass)" or bool(self.chk_enable_mtproto.get()))
-        api_id = int(self.entry_api_id.get().strip() or 94575)
-        api_hash = self.entry_api_hash.get().strip() or "a3406de8d171714214e1e32a2f23e239"
+        api_id = int(self.entry_api_id.get().strip() or 2040)
+        api_hash = self.entry_api_hash.get().strip() or "b18441a1ff607e10a989891a5462e627"
 
         self.btn_test_conn.configure(state="disabled", text="⏳ Testing connection...")
         if hasattr(self, 'btn_test_mtproto_conn'):
@@ -8979,8 +9004,8 @@ class MasterMiniApp(ctk.CTk):
             return
 
         is_mt_mode = (self.opt_conn_mode.get() == "MTProto via TDLib (Censorship Bypass)" or bool(self.chk_enable_mtproto.get()))
-        api_id_in = self.entry_api_id.get().strip() or "94575"
-        api_hash_in = self.entry_api_hash.get().strip() or "a3406de8d171714214e1e32a2f23e239"
+        api_id_in = self.entry_api_id.get().strip() or "2040"
+        api_hash_in = self.entry_api_hash.get().strip() or "b18441a1ff607e10a989891a5462e627"
         auto_px_in = bool(self.chk_auto_proxy.get())
 
         TELEGRAM_CONNECTION_SETTINGS["mode"] = "mtproto" if is_mt_mode else "direct"
@@ -9169,14 +9194,14 @@ class MasterMiniApp(ctk.CTk):
                     token_groups.setdefault(token, {
                         "users": {},
                         "is_mtproto": False,
-                        "api_id": 94575,
-                        "api_hash": "a3406de8d171714214e1e32a2f23e239"
+                        "api_id": 2040,
+                        "api_hash": "b18441a1ff607e10a989891a5462e627"
                     })
                     token_groups[token]["users"][cid] = {"name": name, "acc_id": acc.get("id")}
                     if acc.get("connection_mode") == "mtproto" or acc.get("use_mtproto") or TELEGRAM_CONNECTION_SETTINGS.get("enable_mtproto"):
                         token_groups[token]["is_mtproto"] = True
-                        token_groups[token]["api_id"] = int(acc.get("api_id") or TELEGRAM_CONNECTION_SETTINGS.get("api_id") or 94575)
-                        token_groups[token]["api_hash"] = acc.get("api_hash") or TELEGRAM_CONNECTION_SETTINGS.get("api_hash") or "a3406de8d171714214e1e32a2f23e239"
+                        token_groups[token]["api_id"] = int(acc.get("api_id") or TELEGRAM_CONNECTION_SETTINGS.get("api_id") or 2040)
+                        token_groups[token]["api_hash"] = acc.get("api_hash") or TELEGRAM_CONNECTION_SETTINGS.get("api_hash") or "b18441a1ff607e10a989891a5462e627"
             except (ValueError, TypeError):
                 continue
 
@@ -9263,14 +9288,14 @@ class MasterMiniApp(ctk.CTk):
                     if needs_restart and is_online:
                         user_dict_ref = dict(users)
                         is_mt = False
-                        api_id = 94575
-                        api_hash = "a3406de8d171714214e1e32a2f23e239"
+                        api_id = 2040
+                        api_hash = "b18441a1ff607e10a989891a5462e627"
                         for acc in self.accounts:
                             if acc.get("token", "").strip() == token:
                                 if acc.get("connection_mode") == "mtproto" or acc.get("use_mtproto") or TELEGRAM_CONNECTION_SETTINGS.get("enable_mtproto"):
                                     is_mt = True
-                                    api_id = int(acc.get("api_id") or TELEGRAM_CONNECTION_SETTINGS.get("api_id") or 94575)
-                                    api_hash = acc.get("api_hash") or TELEGRAM_CONNECTION_SETTINGS.get("api_hash") or "a3406de8d171714214e1e32a2f23e239"
+                                    api_id = int(acc.get("api_id") or TELEGRAM_CONNECTION_SETTINGS.get("api_id") or 2040)
+                                    api_hash = acc.get("api_hash") or TELEGRAM_CONNECTION_SETTINGS.get("api_hash") or "b18441a1ff607e10a989891a5462e627"
                                 break
 
                         if is_mt:

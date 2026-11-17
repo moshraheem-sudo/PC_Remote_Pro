@@ -36,6 +36,9 @@ from .tdlib_client import TDLibClient
 from .tdlib_authorization import TDLibBotAuth
 from .telegram_bot_adapter import TelegramBotAdapter
 
+GLOBAL_PROXY_SOURCES = MTProxySources()
+GLOBAL_PROXY_MANAGER = MTProxyManager(GLOBAL_PROXY_SOURCES)
+
 __all__ = [
     "encrypt_credential",
     "decrypt_credential",
@@ -53,5 +56,7 @@ __all__ = [
     "test_proxy_socket",
     "TDLibClient",
     "TDLibBotAuth",
-    "TelegramBotAdapter"
+    "TelegramBotAdapter",
+    "GLOBAL_PROXY_SOURCES",
+    "GLOBAL_PROXY_MANAGER"
 ]

@@ -11,6 +11,9 @@ import threading
 from typing import Callable, Optional
 from .tdlib_client import TDLibClient
 
+DEFAULT_API_ID = 2040
+DEFAULT_API_HASH = "b18441a1ff607e10a989891a5462e627"
+
 class TDLibBotAuth:
     def __init__(
         self,
@@ -25,8 +28,19 @@ class TDLibBotAuth:
         on_error: Optional[Callable[[str], None]] = None
     ):
         self.client = client
-        self.api_id = int(api_id)
-        self.api_hash = str(api_hash).strip()
+        try:
+            aid = int(api_id)
+            if aid in (0, 94575):
+                aid = DEFAULT_API_ID
+        except Exception:
+            aid = DEFAULT_API_ID
+        self.api_id = aid
+
+        ahash = str(api_hash or "").strip()
+        if not ahash or ahash == "a3406de8d171714214e1e32a2f23e239":
+            ahash = DEFAULT_API_HASH
+        self.api_hash = ahash
+
         self.bot_token = str(bot_token).strip()
         self.database_dir = os.path.abspath(database_dir)
         self.files_dir = os.path.join(self.database_dir, "files")
@@ -41,11 +55,23 @@ class TDLibBotAuth:
         self.active_proxy_id: Optional[int] = None
         self._sent_params = False
 
-        # Register authorization update listener
+        # Register update listeners
         self.client.add_update_listener("updateAuthorizationState", self._handle_auth_update)
+        self.client.add_any_update_listener(self._handle_any_update)
 
-        # Proactively send parameters if client is already waiting
-        self._send_tdlib_parameters()
+    def _handle_any_update(self, update: dict):
+        if update.get("@type") == "error":
+            msg = update.get("message", "TDLib internal error")
+            extra = update.get("@extra", "")
+            if "auth" in extra or not self.is_authorized.is_set():
+                self.auth_error = msg
+                if self.on_error:
+                    try:
+                        self.on_error(msg)
+                    except Exception:
+                        pass
+        elif update.get("@type") == "addedProxy":
+            self.active_proxy_id = update.get("id")
 
     def _handle_auth_update(self, update: dict):
         state_obj = update.get("authorization_state", {})
@@ -56,7 +82,14 @@ class TDLibBotAuth:
             self._send_tdlib_parameters()
 
         elif state_type == "authorizationStateWaitPhoneNumber":
-            # For Bot accounts, we authenticate using checkAuthenticationBotToken
+            # TDLib parameters are processed. Apply proxy first if configured.
+            if self.initial_proxy:
+                self.apply_mtproto_proxy(
+                    self.initial_proxy["server"],
+                    self.initial_proxy["port"],
+                    self.initial_proxy["secret"]
+                )
+            # Authenticate bot token
             self._send_bot_token()
 
         elif state_type == "authorizationStateReady":
@@ -67,10 +100,7 @@ class TDLibBotAuth:
                 except Exception:
                     pass
 
-        elif state_type == "authorizationStateClosed":
-            self.is_authorized.clear()
-
-        elif state_type == "authorizationStateLoggingOut":
+        elif state_type in ("authorizationStateClosed", "authorizationStateLoggingOut"):
             self.is_authorized.clear()
 
     def _send_tdlib_parameters(self):
@@ -98,60 +128,37 @@ class TDLibBotAuth:
             "application_version": self.app_version,
             "enable_storage_optimizer": True
         }
-        resp = self.client.send_request(params, timeout=10.0)
-        if resp.get("@type") == "error":
-            err = f"Failed to set TDLib parameters: {resp.get('message')}"
-            self.auth_error = err
-            if self.on_error:
-                self.on_error(err)
-            return
-
-        # If an initial MTProto proxy was provided, configure it immediately
-        if self.initial_proxy:
-            self.apply_mtproto_proxy(
-                self.initial_proxy["server"],
-                self.initial_proxy["port"],
-                self.initial_proxy["secret"]
-            )
+        self.client.send(params)
 
     def _send_bot_token(self):
         req = {
             "@type": "checkAuthenticationBotToken",
+            "@extra": "auth_bot_token",
             "token": self.bot_token
         }
-        resp = self.client.send_request(req, timeout=20.0)
-        if resp.get("@type") == "error":
-            err = f"Bot token authentication failed: {resp.get('message')}"
-            self.auth_error = err
-            if self.on_error:
-                self.on_error(err)
+        self.client.send(req)
 
-    def apply_mtproto_proxy(self, server: str, port: int, secret: str) -> bool:
+    def apply_mtproto_proxy(self, server: str, port: int, secret: str):
         """
-        Adds and enables an MTProto proxy in TDLib.
+        Adds and enables an MTProto proxy in TDLib (non-blocking).
         """
         proxy_req = {
             "@type": "addProxy",
+            "@extra": "apply_proxy",
             "proxy": {
                 "@type": "proxy",
-                "server": server.strip(),
+                "server": str(server).strip(),
                 "port": int(port),
                 "type": {
                     "@type": "proxyTypeMtproto",
-                    "secret": secret.strip()
+                    "secret": str(secret).strip()
                 }
             },
             "enable": True
         }
-        res = self.client.send_request(proxy_req, timeout=10.0)
-        if res.get("@type") in ("addedProxy", "proxy"):
-            self.active_proxy_id = res.get("id")
-            return True
-        elif res.get("@type") == "ok":
-            return True
-        return False
+        self.client.send(proxy_req)
 
     def disable_proxies(self):
         """Disables any active proxy in TDLib (returns to direct connection)."""
-        self.client.send_request({"@type": "disableProxy"}, timeout=5.0)
+        self.client.send({"@type": "disableProxy", "@extra": "disable_proxy"})
         self.active_proxy_id = None

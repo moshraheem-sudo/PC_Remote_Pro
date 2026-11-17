@@ -38,6 +38,9 @@ class TDLibClient:
         self._receiver_thread = threading.Thread(target=self._receive_loop, daemon=True, name="TDLib-Receiver")
         self._receiver_thread.start()
 
+        # Prime/activate client so TDLib initializes and starts emitting updates
+        self.send({"@type": "getOption", "name": "version"})
+
     @staticmethod
     def _find_tdjson_dll(custom_path: Optional[str] = None) -> str:
         """Finds tdjson.dll across bundle and filesystem search locations."""
