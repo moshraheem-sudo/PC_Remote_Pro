@@ -699,7 +699,7 @@ def send_file_direct_requests(token: str, chat_id: int, file_path: str, auto_spl
                     f"{base_url}/bot{token}/sendDocument",
                     data={"chat_id": chat_id, "caption": f"📁 [Sent from PC]:\n{orig_name} ({size_mb:.1f} MB)"},
                     files={"document": (orig_name, fl, "application/octet-stream")},
-                    timeout=600
+                    timeout=(5.0, 300.0)
                 )
             if r.status_code == 200:
                 if progress_callback:
@@ -733,7 +733,7 @@ def send_file_direct_requests(token: str, chat_id: int, file_path: str, auto_spl
                     f"{base_url}/bot{token}/sendDocument",
                     data={"chat_id": chat_id, "caption": f"🗜️ Auto-compressed ({size_mb:.1f}MB ➔ {comp_mb:.1f}MB):\n{orig_name}"},
                     files={"document": (zip_name, fl, "application/zip")},
-                    timeout=600
+                    timeout=(5.0, 300.0)
                 )
             if r.status_code == 200:
                 if progress_callback:
@@ -753,7 +753,7 @@ def send_file_direct_requests(token: str, chat_id: int, file_path: str, auto_spl
                 "chat_id": chat_id,
                 "text": f"📦 Large file exceeds 50MB ({size_mb:.1f} MB):\n📁 File: {orig_name}\n🔢 Split into: {total_parts} parts (each <= 45MB)\n⏳ Uploading parts sequentially..."
             },
-            timeout=30
+            timeout=(4.0, 15.0)
         )
 
         part_num = 1
@@ -779,7 +779,7 @@ def send_file_direct_requests(token: str, chat_id: int, file_path: str, auto_spl
                             "caption": f"📦 Part [{part_num}/{total_parts}] of: {orig_name}\n📊 Part size: {part_mb:.1f} MB (Total: {size_mb:.1f} MB)"
                         },
                         files={"document": (part_name, pf, "application/octet-stream")},
-                        timeout=600
+                        timeout=(5.0, 300.0)
                     )
                 if r.status_code != 200:
                     return False, f"Part {part_num} upload failed ({r.status_code}): {r.text}"
@@ -791,7 +791,7 @@ def send_file_direct_requests(token: str, chat_id: int, file_path: str, auto_spl
                 "chat_id": chat_id,
                 "text": f"✅ All {total_parts} parts of `{orig_name}` uploaded successfully!\n\n💡 You can recombine these parts back into the original file anytime from PC Remote Pro Files Hub."
             },
-            timeout=30
+            timeout=(4.0, 15.0)
         )
         if progress_callback:
             progress_callback(1.0, f"✅ All {total_parts} parts sent successfully!")
@@ -823,7 +823,7 @@ def send_file_to_telegram_sync_bridge(token: str, chat_id: int, file_path: str, 
                     send_large_file_split_telegram(app_inst.bot, chat_id, file_path, auto_split=auto_split, progress_callback=progress_callback),
                     bot_loop
                 )
-                return fut.result(timeout=1200)
+                return fut.result(timeout=8)
             except Exception:
                 pass  # Fall through to direct HTTP upload fallback
 
@@ -845,7 +845,7 @@ def send_text_to_telegram_sync_bridge(token: str, chat_id: int, text: str) -> tu
 
             try:
                 fut = asyncio.run_coroutine_threadsafe(_send_msg(), bot_loop)
-                ok, res = fut.result(timeout=10)
+                ok, res = fut.result(timeout=5)
                 if ok:
                     record_text_message(text, direction="sent", sender_name="PC User", chat_id=chat_id)
                     return True, res
@@ -859,7 +859,7 @@ def send_text_to_telegram_sync_bridge(token: str, chat_id: int, text: str) -> tu
         resp = sess.post(
             url,
             json={"chat_id": chat_id, "text": f"💻 [PC Message]:\n{text}"},
-            timeout=15
+            timeout=(4.0, 10.0)
         )
         if resp.status_code == 200:
             record_text_message(text, direction="sent", sender_name="PC User", chat_id=chat_id)
@@ -1461,13 +1461,18 @@ def parse_telegram_proxy_link(url_str: str) -> tuple[str, str, str, str]:
         return "REVERSE", "", "", url_str
     return "SOCKS5", "", "", ""
 
-def open_telegram_proxy(server: str, port: str, secret: str):
-    """Invokes Telegram Desktop or browser with the MTProto proxy configuration."""
+def open_telegram_proxy(server: str, port: str, secret: str = "", proto: str = "MTPROTO"):
+    """Invokes Telegram Desktop or browser with the proxy configuration."""
     server = server.strip()
     port = port.strip()
     secret = secret.strip()
-    tg_uri = f"tg://proxy?server={server}&port={port}&secret={secret}"
-    https_url = f"https://t.me/proxy?server={server}&port={port}&secret={secret}"
+    proto = str(proto).upper()
+    if proto == "SOCKS5":
+        tg_uri = f"tg://socks?server={server}&port={port}"
+        https_url = f"https://t.me/socks?server={server}&port={port}"
+    else:
+        tg_uri = f"tg://proxy?server={server}&port={port}&secret={secret}"
+        https_url = f"https://t.me/proxy?server={server}&port={port}&secret={secret}"
     try:
         os.startfile(tg_uri)
     except Exception:
@@ -1475,6 +1480,79 @@ def open_telegram_proxy(server: str, port: str, secret: str):
             webbrowser.open(tg_uri)
         except Exception:
             webbrowser.open(https_url)
+
+def fetch_live_socks5_proxies(limit: int = 30) -> list[dict]:
+    """
+    Fetches fresh SOCKS5 proxies from top GitHub lists and verifies them
+    concurrently against Telegram Bot API. Returns verified working proxies sorted by ping.
+    """
+    sources = [
+        "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt",
+        "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
+        "https://raw.githubusercontent.com/prxchk/proxy-list/main/socks5.txt",
+        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"
+    ]
+    raw_list = []
+    seen = set()
+    for s in sources:
+        try:
+            r = requests.get(s, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PCRemotePro/4.2"}, timeout=3.5)
+            for line in r.text.splitlines():
+                line = line.strip()
+                if line and ":" in line and not line.startswith("#"):
+                    if line not in seen:
+                        seen.add(line)
+                        raw_list.append(line)
+            if len(raw_list) >= 120:
+                break
+        except Exception:
+            continue
+
+    # Known high-reliability Telegram SOCKS5 proxies as priority seed
+    known_seeds = ["49.13.22.249:10805", "147.45.79.130:1080", "176.65.132.138:1080", "107.174.30.93:1080"]
+    for k in reversed(known_seeds):
+        if k in seen:
+            raw_list.remove(k)
+        raw_list.insert(0, k)
+
+    results = []
+    def _test_socks5(px_str):
+        parts = px_str.split(":")
+        srv = parts[0].strip()
+        prt = parts[1].strip()
+        t0 = time.time()
+        try:
+            r = requests.get(
+                "https://api.telegram.org",
+                proxies={"https": f"socks5://{srv}:{prt}"},
+                timeout=(2.0, 3.0)
+            )
+            lat = round((time.time() - t0) * 1000, 1)
+            if r.status_code in (200, 302, 404):
+                return {
+                    "server": srv,
+                    "port": prt,
+                    "proto": "SOCKS5",
+                    "secret": "",
+                    "link": f"tg://socks?server={srv}&port={prt}",
+                    "ping": lat,
+                    "online": True
+                }
+        except Exception:
+            pass
+        return None
+
+    from concurrent.futures import ThreadPoolExecutor
+    candidates = raw_list[:50]
+    with ThreadPoolExecutor(max_workers=25) as pool:
+        for item in pool.map(_test_socks5, candidates):
+            if item:
+                results.append(item)
+                if len(results) >= limit:
+                    break
+
+    results.sort(key=lambda x: x["ping"])
+    return results
 
 def fetch_solispirit_proxies(limit: int = 40) -> list[dict]:
     """
@@ -2899,15 +2977,14 @@ class SmartNetworkWatchdog:
         self.consecutive_fails = 0
 
     def check_internet(self) -> bool:
-        # Fast multi-endpoint check using port 443
+        # Fast DNS socket check (timeout 0.6s) - does not block or depend on censored web domains
         endpoints = [
-            ("api.telegram.org", 443),
-            ("1.1.1.1", 443),
-            ("8.8.8.8", 443)
+            ("1.1.1.1", 53),
+            ("8.8.8.8", 53)
         ]
         for host, port in endpoints:
             try:
-                s = socket.create_connection((host, port), timeout=3)
+                s = socket.create_connection((host, port), timeout=0.6)
                 s.close()
                 return True
             except OSError:
@@ -7564,7 +7641,7 @@ class MasterMiniApp(ctk.CTk):
         )
         btn_bottom_back.pack(fill="x", padx=10, pady=(4, 12))
 
-    # ----------------- Screen 7: MTProto Proxy Manager (Proxy 🛡️) -----------------
+    # ----------------- Screen 7: MTProto & SOCKS5 Proxy Manager (Proxy 🛡️) -----------------
     def setup_proxy_ui(self):
         # Header toolbar
         self.header_proxy = ctk.CTkFrame(self.frame_proxy, fg_color="transparent")
@@ -7589,7 +7666,7 @@ class MasterMiniApp(ctk.CTk):
 
         lbl_title = ctk.CTkLabel(
             self.header_proxy,
-            text="MTProto Proxy Manager",
+            text="Proxy Shield & MTProto Manager",
             font=ctk.CTkFont(size=13, weight="bold")
         )
         lbl_title.pack(side="left", padx=4)
@@ -7623,7 +7700,7 @@ class MasterMiniApp(ctk.CTk):
 
         self.lbl_proxy_active_info = ctk.CTkLabel(
             card_status,
-            text="Operating in direct connection mode. Connect to a live MTProto proxy below if Telegram is blocked.",
+            text="Operating in direct connection mode. Connect to a verified SOCKS5 proxy or local VPN below if Telegram is blocked.",
             font=ctk.CTkFont(size=9),
             text_color="#888888",
             wraplength=330,
@@ -7643,9 +7720,123 @@ class MasterMiniApp(ctk.CTk):
             font=ctk.CTkFont(size=10, weight="bold"),
             command=self.disable_proxy_settings_gui
         )
-        btn_disable_proxy.pack(fill="x")
+        btn_disable_proxy.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
-        # --- Card 2: SoliSpirit MTProto Live Feed ---
+        self.btn_test_proxy_conn = ctk.CTkButton(
+            row_status_btn,
+            text="⚡ Test Telegram Connection",
+            height=26,
+            fg_color="#0088cc",
+            hover_color="#006699",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self.test_proxy_connection_gui
+        )
+        self.btn_test_proxy_conn.pack(side="right", fill="x", expand=True, padx=(4, 0))
+
+        # --- Card 2: Local VPN & Custom Proxy ---
+        card_custom = ctk.CTkFrame(self.scroll_proxy, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
+        card_custom.pack(fill="x", padx=4, pady=(0, 6))
+
+        row_custom_head = ctk.CTkFrame(card_custom, fg_color="transparent")
+        row_custom_head.pack(fill="x", padx=10, pady=(6, 2))
+
+        lbl_custom_title = ctk.CTkLabel(
+            row_custom_head,
+            text="🛡️ Local VPN & Custom Proxy (V2Ray / Clash):",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#00bcd4"
+        )
+        lbl_custom_title.pack(side="left")
+
+        btn_detect_vpn = ctk.CTkButton(
+            card_custom,
+            text="🔍 Auto-Detect Local VPN (V2Ray / Clash)",
+            height=28,
+            fg_color="#2b3e50",
+            hover_color="#3a536b",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self.auto_detect_vpn_gui
+        )
+        btn_detect_vpn.pack(fill="x", padx=10, pady=(2, 4))
+
+        row_inputs = ctk.CTkFrame(card_custom, fg_color="transparent")
+        row_inputs.pack(fill="x", padx=10, pady=(0, 8))
+
+        lbl_h = ctk.CTkLabel(row_inputs, text="Host:", font=ctk.CTkFont(size=9))
+        lbl_h.pack(side="left", padx=(0, 2))
+
+        self.entry_custom_host = ctk.CTkEntry(row_inputs, width=95, height=24, font=ctk.CTkFont(size=9))
+        self.entry_custom_host.insert(0, "127.0.0.1")
+        self.entry_custom_host.pack(side="left", padx=(0, 4))
+
+        lbl_p = ctk.CTkLabel(row_inputs, text="Port:", font=ctk.CTkFont(size=9))
+        lbl_p.pack(side="left", padx=(0, 2))
+
+        self.entry_custom_port = ctk.CTkEntry(row_inputs, width=55, height=24, font=ctk.CTkFont(size=9), placeholder_text="10808")
+        self.entry_custom_port.insert(0, "10808")
+        self.entry_custom_port.pack(side="left", padx=(0, 4))
+
+        self.opt_custom_proto = ctk.CTkOptionMenu(
+            row_inputs,
+            values=["SOCKS5", "HTTP"],
+            width=78,
+            height=24,
+            font=ctk.CTkFont(size=9, weight="bold")
+        )
+        self.opt_custom_proto.set("SOCKS5")
+        self.opt_custom_proto.pack(side="left", padx=(0, 4))
+
+        btn_apply_custom = ctk.CTkButton(
+            row_inputs,
+            text="⚡ Connect",
+            width=65,
+            height=24,
+            fg_color="#28a748",
+            hover_color="#218838",
+            font=ctk.CTkFont(size=9, weight="bold"),
+            command=self.apply_custom_proxy_gui
+        )
+        btn_apply_custom.pack(side="left")
+
+        # --- Card 3: Live Verified SOCKS5 Proxies ---
+        card_socks5 = ctk.CTkFrame(self.scroll_proxy, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
+        card_socks5.pack(fill="x", padx=4, pady=(0, 6))
+
+        row_socks_head = ctk.CTkFrame(card_socks5, fg_color="transparent")
+        row_socks_head.pack(fill="x", padx=10, pady=(6, 2))
+
+        lbl_socks_title = ctk.CTkLabel(
+            row_socks_head,
+            text="🟢 Live SOCKS5 Proxies (App & Bot API):",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#00bcd4"
+        )
+        lbl_socks_title.pack(side="left")
+
+        self.btn_refresh_socks = ctk.CTkButton(
+            card_socks5,
+            text="🔄 Fetch Verified SOCKS5 Proxies",
+            height=30,
+            fg_color="#28a748",
+            hover_color="#218838",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self.refresh_socks5_proxies_gui
+        )
+        self.btn_refresh_socks.pack(fill="x", padx=10, pady=(4, 4))
+
+        self.lbl_socks5_fetch_status = ctk.CTkLabel(
+            card_socks5,
+            text="Press button above to load live SOCKS5 proxies tested directly against Telegram Bot API.",
+            font=ctk.CTkFont(size=9),
+            text_color="#888888"
+        )
+        self.lbl_socks5_fetch_status.pack(anchor="w", padx=10, pady=(0, 6))
+
+        self.frame_socks5_list = ctk.CTkFrame(card_socks5, fg_color="transparent")
+        self.frame_socks5_list.pack(fill="x", padx=6, pady=(0, 6))
+
+        # --- Card 4: SoliSpirit MTProto Live Feed ---
         card_soli = ctk.CTkFrame(self.scroll_proxy, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
         card_soli.pack(fill="x", padx=4, pady=(0, 6))
 
@@ -7654,7 +7845,7 @@ class MasterMiniApp(ctk.CTk):
 
         lbl_soli_title = ctk.CTkLabel(
             row_soli_head,
-            text="🌐 SoliSpirit/mtproto Live Feed:",
+            text="🌐 SoliSpirit/mtproto Live Feed (Telegram Desktop):",
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color="#00bcd4"
         )
@@ -7662,8 +7853,8 @@ class MasterMiniApp(ctk.CTk):
 
         self.btn_refresh_soli = ctk.CTkButton(
             card_soli,
-            text="🔄 Fetch Live Proxies (SoliSpirit)",
-            height=32,
+            text="🔄 Fetch MTProto Proxies (SoliSpirit)",
+            height=30,
             fg_color="#0088cc",
             hover_color="#006699",
             text_color="#FFFFFF",
@@ -7674,13 +7865,13 @@ class MasterMiniApp(ctk.CTk):
 
         self.lbl_soli_fetch_status = ctk.CTkLabel(
             card_soli,
-            text="Press button above to load verified live proxies from SoliSpirit GitHub.",
+            text="Press button above to load live MTProto proxies for Telegram Desktop client.",
             font=ctk.CTkFont(size=9),
             text_color="#888888"
         )
         self.lbl_soli_fetch_status.pack(anchor="w", padx=10, pady=(0, 6))
 
-        # Dynamic Container inside Card 2
+        # Dynamic Container inside Card 4
         self.frame_soli_list = ctk.CTkFrame(card_soli, fg_color="transparent")
         self.frame_soli_list.pack(fill="x", padx=6, pady=(0, 6))
 
@@ -7693,6 +7884,159 @@ class MasterMiniApp(ctk.CTk):
         )
         self.lbl_proxy_msg.pack(padx=10, pady=(2, 6))
 
+    def test_proxy_connection_gui(self):
+        """Tests live connectivity to Telegram Bot API through the active proxy."""
+        self.btn_test_proxy_conn.configure(state="disabled", text="⏳ Testing connection...")
+
+        def _worker():
+            token = ""
+            if self.active_account:
+                token = self.active_account.get("token", "").strip()
+            elif self.accounts:
+                token = self.accounts[0].get("token", "").strip()
+
+            if not token:
+                def _err():
+                    self.btn_test_proxy_conn.configure(state="normal", text="⚡ Test Telegram Connection")
+                    self._show_proxy_msg("⚠️ Please register an account with a Bot Token first.", "#f39c12")
+                self.after(0, _err)
+                return
+
+            sess = get_telegram_session()
+            base_url = get_active_telegram_base_url()
+            t0 = time.time()
+            try:
+                r = sess.get(f"{base_url}/bot{token}/getMe", timeout=(4.0, 6.0))
+                lat = round((time.time() - t0) * 1000, 1)
+                data = r.json()
+                if data.get("ok"):
+                    bot_name = data.get("result", {}).get("username", "Bot")
+                    res_msg = f"✅ Connected to @{bot_name} successfully! (Latency: {lat} ms)"
+                    col = "#28a748"
+                else:
+                    res_msg = f"⚠️ Telegram Error: {data.get('description')}"
+                    col = "#f39c12"
+            except Exception as e:
+                res_msg = f"❌ Connection failed: {e}"
+                col = "#dc3545"
+
+            def _done():
+                self.btn_test_proxy_conn.configure(state="normal", text="⚡ Test Telegram Connection")
+                self._show_proxy_msg(res_msg, col)
+            self.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def auto_detect_vpn_gui(self):
+        """Probes localhost for running proxy clients and populates inputs."""
+        detected = detect_local_proxies()
+        if detected:
+            first = detected[0]
+            self.entry_custom_host.delete(0, "end")
+            self.entry_custom_host.insert(0, first.get("host", "127.0.0.1"))
+            self.entry_custom_port.delete(0, "end")
+            self.entry_custom_port.insert(0, str(first.get("port", 10808)))
+            self.opt_custom_proto.set(first.get("proto", "SOCKS5"))
+            self._show_proxy_msg(f"✅ Found running local VPN: {first.get('label')} ({first.get('host')}:{first.get('port')})!", "#28a748")
+        else:
+            self._show_proxy_msg("⚠️ No local VPN detected on ports 10808, 7890, or 1080. Enter host & port manually.", "#f39c12")
+
+    def apply_custom_proxy_gui(self):
+        """Activates custom manual proxy settings."""
+        host = self.entry_custom_host.get().strip()
+        port = self.entry_custom_port.get().strip()
+        proto = self.opt_custom_proto.get().strip().upper()
+        if not host or not port:
+            self._show_proxy_msg("❌ Please enter both Host and Port.", "#dc3545")
+            return
+        px_data = {
+            "server": host,
+            "port": port,
+            "secret": "",
+            "proto": proto
+        }
+        self.activate_proxy_item(px_data)
+
+    def refresh_socks5_proxies_gui(self):
+        """Fetches live SOCKS5 proxies tested directly against Telegram Bot API."""
+        self.btn_refresh_socks.configure(state="disabled", text="⏳ Testing & fetching SOCKS5 proxies...")
+        self.lbl_socks5_fetch_status.configure(text="Scanning verified GitHub lists and testing Telegram Bot API...", text_color="#f39c12")
+
+        def _worker():
+            proxies = fetch_live_socks5_proxies(limit=25)
+            def _update():
+                self.btn_refresh_socks.configure(state="normal", text="🔄 Fetch Verified SOCKS5 Proxies")
+                for w in self.frame_socks5_list.winfo_children():
+                    w.destroy()
+
+                if not proxies:
+                    self.lbl_socks5_fetch_status.configure(text="❌ Failed to reach proxy feeds. Check internet or local VPN.", text_color="#dc3545")
+                    return
+
+                self.lbl_socks5_fetch_status.configure(
+                    text=f"✅ Loaded {len(proxies)} verified SOCKS5 proxies ready for PC Remote Pro.",
+                    text_color="#28a748"
+                )
+
+                for p in proxies:
+                    card = ctk.CTkFrame(self.frame_socks5_list, fg_color="#181818", corner_radius=6, border_width=1, border_color="#2c2c2c")
+                    card.pack(fill="x", pady=2)
+
+                    row_top = ctk.CTkFrame(card, fg_color="transparent")
+                    row_top.pack(fill="x", padx=8, pady=(4, 2))
+
+                    server_display = f"SOCKS5: {p['server']}:{p['port']}"
+                    lbl_srv = ctk.CTkLabel(row_top, text=server_display, font=ctk.CTkFont(size=10, weight="bold"), text_color="#FFFFFF")
+                    lbl_srv.pack(side="left")
+
+                    ping_val = p.get("ping", 0.0)
+                    ping_col = "#28a748" if ping_val < 300 else ("#f39c12" if ping_val < 700 else "#dc3545")
+                    lbl_ping = ctk.CTkLabel(row_top, text=f"⚡ {ping_val:.0f} ms", font=ctk.CTkFont(size=9, weight="bold"), text_color=ping_col)
+                    lbl_ping.pack(side="right")
+
+                    row_act = ctk.CTkFrame(card, fg_color="transparent")
+                    row_act.pack(fill="x", padx=8, pady=(0, 4))
+
+                    btn_conn_app = ctk.CTkButton(
+                        row_act,
+                        text="⚡ Connect App",
+                        width=105,
+                        height=24,
+                        fg_color="#28a748",
+                        hover_color="#218838",
+                        font=ctk.CTkFont(size=9, weight="bold"),
+                        command=lambda px=p: self.activate_proxy_item(px)
+                    )
+                    btn_conn_app.pack(side="left", padx=(0, 4))
+
+                    btn_open_tg = ctk.CTkButton(
+                        row_act,
+                        text="🚀 Open in Telegram",
+                        width=115,
+                        height=24,
+                        fg_color="#0088cc",
+                        hover_color="#006699",
+                        font=ctk.CTkFont(size=9, weight="bold"),
+                        command=lambda px=p: open_telegram_proxy(px["server"], px["port"], proto="SOCKS5")
+                    )
+                    btn_open_tg.pack(side="left", padx=(0, 4))
+
+                    btn_copy = ctk.CTkButton(
+                        row_act,
+                        text="📋 Copy",
+                        width=45,
+                        height=24,
+                        fg_color="#333333",
+                        hover_color="#444444",
+                        font=ctk.CTkFont(size=9),
+                        command=lambda px=p: self._copy_link_to_clipboard(px.get("link", ""))
+                    )
+                    btn_copy.pack(side="right")
+
+            self.after(0, _update)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def refresh_solispirit_proxies_gui(self):
         """Fetches live MTProto proxies from SoliSpirit/mtproto and displays them in the GUI."""
         self.btn_refresh_soli.configure(state="disabled", text="⏳ Fetching live proxies from SoliSpirit...")
@@ -7701,7 +8045,7 @@ class MasterMiniApp(ctk.CTk):
         def _worker():
             proxies = fetch_solispirit_proxies(limit=30)
             def _update():
-                self.btn_refresh_soli.configure(state="normal", text="🔄 Fetch Live Proxies (SoliSpirit)")
+                self.btn_refresh_soli.configure(state="normal", text="🔄 Fetch MTProto Proxies (SoliSpirit)")
                 for w in self.frame_soli_list.winfo_children():
                     w.destroy()
 
@@ -7740,26 +8084,14 @@ class MasterMiniApp(ctk.CTk):
                     btn_open_tg = ctk.CTkButton(
                         row_act,
                         text="🚀 Open in Telegram",
-                        width=120,
+                        width=130,
                         height=24,
                         fg_color="#0088cc",
                         hover_color="#006699",
                         font=ctk.CTkFont(size=9, weight="bold"),
-                        command=lambda px=p: open_telegram_proxy(px["server"], px["port"], px["secret"])
+                        command=lambda px=p: open_telegram_proxy(px["server"], px["port"], px["secret"], proto="MTPROTO")
                     )
                     btn_open_tg.pack(side="left", padx=(0, 4))
-
-                    btn_conn_app = ctk.CTkButton(
-                        row_act,
-                        text="⚡ Connect App",
-                        width=95,
-                        height=24,
-                        fg_color="#28a748",
-                        hover_color="#218838",
-                        font=ctk.CTkFont(size=9, weight="bold"),
-                        command=lambda px=p: self.activate_proxy_item(px)
-                    )
-                    btn_conn_app.pack(side="left", padx=(0, 4))
 
                     btn_copy = ctk.CTkButton(
                         row_act,
@@ -7778,12 +8110,13 @@ class MasterMiniApp(ctk.CTk):
         threading.Thread(target=_worker, daemon=True).start()
 
     def activate_proxy_item(self, proxy_data: dict):
-        """Activates and saves selected MTProto proxy."""
+        """Activates and saves selected SOCKS5 or HTTP proxy."""
         global PROXY_SETTINGS
+        proto = str(proxy_data.get("proto", "SOCKS5")).upper()
         PROXY_SETTINGS["server"] = proxy_data.get("server", "").strip()
         PROXY_SETTINGS["port"] = str(proxy_data.get("port", "")).strip()
         PROXY_SETTINGS["secret"] = proxy_data.get("secret", "").strip()
-        PROXY_SETTINGS["proto"] = "MTPROTO"
+        PROXY_SETTINGS["proto"] = proto
         PROXY_SETTINGS["enabled"] = True
 
         save_config(self.accounts, autostart=self.config.get("autostart", True), proxy=PROXY_SETTINGS)
@@ -7794,7 +8127,7 @@ class MasterMiniApp(ctk.CTk):
         self.after(600, self.start_all_bots)
 
         self.load_proxy_settings_into_ui()
-        self._show_proxy_msg(f"✅ Proxy {proxy_data.get('server')}:{proxy_data.get('port')} activated for PC Remote Pro!", "#28a748")
+        self._show_proxy_msg(f"✅ {proto} Proxy {PROXY_SETTINGS['server']}:{PROXY_SETTINGS['port']} activated for PC Remote Pro!", "#28a748")
 
     def disable_proxy_settings_gui(self):
         """Disables proxy settings and restores direct connection mode."""
@@ -7814,19 +8147,26 @@ class MasterMiniApp(ctk.CTk):
         """Refreshes status label in the proxy UI based on active PROXY_SETTINGS."""
         global PROXY_SETTINGS
         if PROXY_SETTINGS.get("enabled"):
-            proto = PROXY_SETTINGS.get("proto", "MTPROTO")
+            proto = str(PROXY_SETTINGS.get("proto", "SOCKS5")).upper()
             server = PROXY_SETTINGS.get("server", "")
             port = PROXY_SETTINGS.get("port", "")
 
-            self.lbl_proxy_live_status.configure(text="● Proxy Active", text_color="#28a748")
-            self.lbl_proxy_active_info.configure(
-                text=f"Active Proxy: {proto}://{server}:{port}\n(Traffic routed through proxy shield)",
-                text_color="#28a748"
-            )
+            if proto in ("SOCKS5", "HTTP"):
+                self.lbl_proxy_live_status.configure(text=f"● Proxy Active ({proto})", text_color="#28a748")
+                self.lbl_proxy_active_info.configure(
+                    text=f"Active Proxy: {proto.lower()}://{server}:{port}\n(All Telegram bot traffic, file transfers, and messages are routed securely through proxy shield)",
+                    text_color="#28a748"
+                )
+            else:
+                self.lbl_proxy_live_status.configure(text="● MTProto Active (Telegram Desktop Only)", text_color="#f39c12")
+                self.lbl_proxy_active_info.configure(
+                    text=f"Active MTProto: {server}:{port}\n(MTProto is for Telegram Desktop app. To route PC Remote Pro bot and files, select a SOCKS5 proxy or local VPN below)",
+                    text_color="#f39c12"
+                )
         else:
             self.lbl_proxy_live_status.configure(text="● Direct Mode (No Proxy)", text_color="#aaaaaa")
             self.lbl_proxy_active_info.configure(
-                text="Operating in direct connection mode (No Proxy). Connect to a live MTProto proxy below if Telegram is blocked.",
+                text="Operating in direct connection mode (No Proxy). If Telegram is blocked in your region, select a SOCKS5 proxy or local VPN below.",
                 text_color="#888888"
             )
 
@@ -7864,15 +8204,18 @@ class MasterMiniApp(ctk.CTk):
             return
 
         self.btn_test_conn.configure(state="disabled", text="⏳ Testing connection...")
-        self.update_idletasks()
 
-        success, msg = test_telegram_connection(token, chat_id)
-        self.btn_test_conn.configure(state="normal", text="⚡ Test Bot Connection")
+        def _bg_test():
+            success, msg = test_telegram_connection(token, chat_id)
+            def _done():
+                self.btn_test_conn.configure(state="normal", text="⚡ Test Bot Connection")
+                if success:
+                    messagebox.showinfo("Connection Success", msg, parent=self)
+                else:
+                    messagebox.showerror("Connection Diagnostic", msg, parent=self)
+            self.after(0, _done)
 
-        if success:
-            messagebox.showinfo("Connection Success", msg, parent=self)
-        else:
-            messagebox.showerror("Connection Diagnostic", msg, parent=self)
+        threading.Thread(target=_bg_test, daemon=True).start()
 
     def set_account_password(self):
         if not self.active_account:
@@ -8099,72 +8442,81 @@ class MasterMiniApp(ctk.CTk):
         )
 
     def watchdog_supervisor(self):
-        try:
-            # Check real internet connectivity
-            is_online = SMART_NETWORK_WATCHDOG.check_internet()
+        def _bg_watchdog():
+            try:
+                # Fast background internet connectivity check (never blocks GUI thread)
+                is_online = SMART_NETWORK_WATCHDOG.check_internet()
 
-            token_groups = {}
-            for acc in self.accounts:
-                token = acc.get("token", "").strip()
-                cid_str = str(acc.get("chat_id", "")).strip()
-                name = acc.get("name", "User").strip()
-                try:
-                    cid = int(cid_str)
-                    if token and cid:
-                        token_groups.setdefault(token, {})[cid] = {"name": name, "acc_id": acc.get("id")}
-                except (ValueError, TypeError):
-                    continue
+                token_groups = {}
+                for acc in self.accounts:
+                    token = acc.get("token", "").strip()
+                    cid_str = str(acc.get("chat_id", "")).strip()
+                    name = acc.get("name", "User").strip()
+                    try:
+                        cid = int(cid_str)
+                        if token and cid:
+                            token_groups.setdefault(token, {})[cid] = {"name": name, "acc_id": acc.get("id")}
+                    except (ValueError, TypeError):
+                        continue
 
-            active_count = 0
-            for token, users in token_groups.items():
-                entry = ACTIVE_BOT_REGISTRY.get(token)
-                needs_restart = False
-                if not entry:
-                    needs_restart = True
-                else:
-                    t = entry.get("thread")
-                    if not t or not t.is_alive():
+                active_count = 0
+                for token, users in token_groups.items():
+                    entry = ACTIVE_BOT_REGISTRY.get(token)
+                    needs_restart = False
+                    if not entry:
                         needs_restart = True
                     else:
+                        t = entry.get("thread")
+                        if not t or not t.is_alive():
+                            needs_restart = True
+                        else:
+                            active_count += len(users)
+
+                    if needs_restart and is_online:
+                        user_dict_ref = dict(users)
+                        thread = threading.Thread(target=start_bot_thread, args=(token, user_dict_ref), daemon=True)
+                        ACTIVE_BOT_REGISTRY[token] = {
+                            "thread": thread,
+                            "user_map": user_dict_ref,
+                            "app": None,
+                            "loop": None,
+                            "stop_requested": False
+                        }
+                        thread.start()
                         active_count += len(users)
 
-                if needs_restart and is_online:
-                    user_dict_ref = dict(users)
-                    thread = threading.Thread(target=start_bot_thread, args=(token, user_dict_ref), daemon=True)
-                    ACTIVE_BOT_REGISTRY[token] = {
-                        "thread": thread,
-                        "user_map": user_dict_ref,
-                        "app": None,
-                        "loop": None,
-                        "stop_requested": False
-                    }
-                    thread.start()
-                    active_count += len(users)
-
-            # Update live dashboard and tray status
-            if not getattr(self, "is_downloading_update", False):
-                if not self.accounts:
-                    self.lbl_dash_status.configure(text=f"Status: No accounts registered • {APP_VERSION}", text_color="gray")
-                    tray_info = f"{APP_NAME} - {APP_VERSION}"
-                elif not is_online:
-                    self.lbl_dash_status.configure(text=f"⚠️ Internet Disconnected • Reconnecting... • {APP_VERSION}", text_color="#e0a800")
-                    tray_info = f"{APP_NAME} {APP_VERSION} (Offline ⚠️)"
-                else:
-                    self.lbl_dash_status.configure(
-                        text=f"🟢 Online & Active: {active_count} of {len(self.accounts)} accounts connected ✅ • {APP_VERSION}",
-                        text_color="#28a748"
-                    )
-                    tray_info = f"{APP_NAME} {APP_VERSION} (Online ✅ • Active)"
-
-                if self.tray_icon:
+                # Update live dashboard and tray status smoothly on main GUI thread
+                def _update_ui():
                     try:
-                        self.tray_icon.title = tray_info
+                        if not getattr(self, "is_downloading_update", False):
+                            if not self.accounts:
+                                self.lbl_dash_status.configure(text=f"Status: No accounts registered • {APP_VERSION}", text_color="gray")
+                                tray_info = f"{APP_NAME} - {APP_VERSION}"
+                            elif not is_online:
+                                self.lbl_dash_status.configure(text=f"⚠️ Internet Disconnected • Reconnecting... • {APP_VERSION}", text_color="#e0a800")
+                                tray_info = f"{APP_NAME} {APP_VERSION} (Offline ⚠️)"
+                            else:
+                                self.lbl_dash_status.configure(
+                                    text=f"🟢 Online & Active: {active_count} of {len(self.accounts)} accounts connected ✅ • {APP_VERSION}",
+                                    text_color="#28a748"
+                                )
+                                tray_info = f"{APP_NAME} {APP_VERSION} (Online ✅ • Active)"
+
+                            if self.tray_icon:
+                                try:
+                                    self.tray_icon.title = tray_info
+                                except Exception:
+                                    pass
                     except Exception:
                         pass
-        except Exception:
-            pass
-        finally:
-            self.after(10000, self.watchdog_supervisor)
+
+                self.after(0, _update_ui)
+            except Exception:
+                pass
+            finally:
+                self.after(10000, self.watchdog_supervisor)
+
+        threading.Thread(target=_bg_watchdog, daemon=True).start()
 
     def hide_to_tray(self):
         self.withdraw()
