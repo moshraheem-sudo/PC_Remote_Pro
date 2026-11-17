@@ -41,7 +41,8 @@ REQUIRED_LIBS = {
     "telegram": "python-telegram-bot",
     "pystray": "pystray",
     "cv2": "opencv-python",
-    "windnd": "windnd"
+    "windnd": "windnd",
+    "requests": "requests"
 }
 
 missing_libs = []
@@ -58,6 +59,7 @@ if missing_libs:
         pass
 
 # ----------------- 3. Core Imports -----------------
+import requests
 import re
 import json
 import time
@@ -79,7 +81,7 @@ import urllib.request
 import winreg
 from datetime import datetime
 import psutil
-from PIL import ImageGrab, Image, ImageDraw
+from PIL import ImageGrab, Image, ImageDraw, ImageFilter
 import tkinter as tk
 import customtkinter as ctk
 import tkinter.messagebox as messagebox
@@ -668,21 +670,165 @@ async def send_large_file_split_telegram(bot, chat_id: int, file_path: str, auto
         except Exception:
             pass
 
+def send_file_direct_requests(token: str, chat_id: int, file_path: str, auto_split: bool = True, progress_callback=None) -> tuple[bool, str]:
+    """
+    Direct HTTP multipart file upload fallback using get_telegram_session().
+    Guarantees file delivery even when background bot polling is offline or reconnecting.
+    Handles < 48MB direct, and > 48MB with auto zip-compression and chunk splitting.
+    """
+    if not os.path.exists(file_path):
+        return False, "File not found."
+
+    orig_name = os.path.basename(file_path)
+    file_size = os.path.getsize(file_path)
+    size_mb = file_size / (1024 * 1024)
+
+    if file_size > 200 * 1024 * 1024:
+        return False, f"File '{orig_name}' ({size_mb:.1f} MB) exceeds maximum allowed size of 200 MB."
+
+    sess = get_telegram_session()
+    base_url = get_active_telegram_base_url()
+
+    # Under 48 MB or auto_split is False:
+    if file_size <= 48 * 1024 * 1024 or not auto_split:
+        if progress_callback:
+            progress_callback(0.3, f"Uploading: {orig_name} ({size_mb:.1f} MB)...")
+        try:
+            with open(file_path, "rb") as fl:
+                r = sess.post(
+                    f"{base_url}/bot{token}/sendDocument",
+                    data={"chat_id": chat_id, "caption": f"📁 [Sent from PC]:\n{orig_name} ({size_mb:.1f} MB)"},
+                    files={"document": (orig_name, fl, "application/octet-stream")},
+                    timeout=600
+                )
+            if r.status_code == 200:
+                if progress_callback:
+                    progress_callback(1.0, f"✅ Successfully sent: {orig_name}")
+                record_transfer(orig_name, file_path, file_size, direction="sent", chat_id=chat_id)
+                return True, "File sent successfully via direct stream."
+            else:
+                return False, f"Telegram API error ({r.status_code}): {r.text}"
+        except Exception as e:
+            return False, f"Direct upload error: {e}"
+
+    # Over 48 MB: Try Zip compression first, then chunk splitting if needed
+    if progress_callback:
+        progress_callback(0.1, f"File exceeds 50MB ({size_mb:.1f} MB). Auto-compressing...")
+
+    temp_dir = tempfile.mkdtemp(prefix="pcremote_direct_")
+    try:
+        zip_name = f"{os.path.splitext(orig_name)[0]}.zip"
+        zip_path = os.path.join(temp_dir, zip_name)
+        with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            zf.write(file_path, arcname=orig_name)
+
+        compressed_size = os.path.getsize(zip_path)
+        comp_mb = compressed_size / (1024 * 1024)
+
+        if compressed_size <= 48 * 1024 * 1024:
+            if progress_callback:
+                progress_callback(0.5, f"Uploading compressed file ({comp_mb:.1f} MB)...")
+            with open(zip_path, "rb") as fl:
+                r = sess.post(
+                    f"{base_url}/bot{token}/sendDocument",
+                    data={"chat_id": chat_id, "caption": f"🗜️ Auto-compressed ({size_mb:.1f}MB ➔ {comp_mb:.1f}MB):\n{orig_name}"},
+                    files={"document": (zip_name, fl, "application/zip")},
+                    timeout=600
+                )
+            if r.status_code == 200:
+                if progress_callback:
+                    progress_callback(1.0, f"✅ Successfully sent: {orig_name}")
+                record_transfer(orig_name, file_path, file_size, direction="sent", chat_id=chat_id)
+                return True, "Compressed file sent successfully."
+
+        # If still > 48MB, split into 45MB chunks
+        CHUNK_SIZE = 45 * 1024 * 1024
+        total_parts = math.ceil(file_size / CHUNK_SIZE)
+        if progress_callback:
+            progress_callback(0.2, f"Splitting into {total_parts} parts...")
+
+        sess.post(
+            f"{base_url}/bot{token}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": f"📦 Large file exceeds 50MB ({size_mb:.1f} MB):\n📁 File: {orig_name}\n🔢 Split into: {total_parts} parts (each <= 45MB)\n⏳ Uploading parts sequentially..."
+            },
+            timeout=30
+        )
+
+        part_num = 1
+        with open(file_path, "rb") as src:
+            while True:
+                chunk = src.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                part_name = f"{orig_name}.part{part_num:03d}"
+                part_path = os.path.join(temp_dir, part_name)
+                with open(part_path, "wb") as pf:
+                    pf.write(chunk)
+                part_mb = len(chunk) / (1024 * 1024)
+                pct = 0.2 + (0.7 * (part_num / total_parts))
+                if progress_callback:
+                    progress_callback(pct, f"Uploading part {part_num} of {total_parts} ({part_mb:.1f} MB)...")
+
+                with open(part_path, "rb") as pf:
+                    r = sess.post(
+                        f"{base_url}/bot{token}/sendDocument",
+                        data={
+                            "chat_id": chat_id,
+                            "caption": f"📦 Part [{part_num}/{total_parts}] of: {orig_name}\n📊 Part size: {part_mb:.1f} MB (Total: {size_mb:.1f} MB)"
+                        },
+                        files={"document": (part_name, pf, "application/octet-stream")},
+                        timeout=600
+                    )
+                if r.status_code != 200:
+                    return False, f"Part {part_num} upload failed ({r.status_code}): {r.text}"
+                part_num += 1
+
+        sess.post(
+            f"{base_url}/bot{token}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": f"✅ All {total_parts} parts of `{orig_name}` uploaded successfully!\n\n💡 You can recombine these parts back into the original file anytime from PC Remote Pro Files Hub."
+            },
+            timeout=30
+        )
+        if progress_callback:
+            progress_callback(1.0, f"✅ All {total_parts} parts sent successfully!")
+        record_transfer(orig_name, file_path, file_size, direction="sent", chat_id=chat_id)
+        return True, f"File split and uploaded successfully ({total_parts} parts)"
+    except Exception as e:
+        return False, str(e)
+    finally:
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
 def send_file_to_telegram_sync_bridge(token: str, chat_id: int, file_path: str, auto_split: bool = True, progress_callback=None) -> tuple[bool, str]:
+    if not os.path.exists(file_path):
+        return False, "File not found."
+
+    file_size = os.path.getsize(file_path)
+    if file_size > 200 * 1024 * 1024:
+        return False, f"File exceeds maximum allowed size of 200 MB ({file_size/(1024*1024):.1f} MB)."
+
     bot_entry = ACTIVE_BOT_REGISTRY.get(token)
-    if not bot_entry or not bot_entry.get("app") or not bot_entry.get("loop"):
-        return False, "Telegram bot is currently offline for this account."
+    if bot_entry and bot_entry.get("app") and bot_entry.get("loop"):
+        app_inst = bot_entry["app"]
+        bot_loop = bot_entry["loop"]
+        if bot_loop and not bot_loop.is_closed():
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    send_large_file_split_telegram(app_inst.bot, chat_id, file_path, auto_split=auto_split, progress_callback=progress_callback),
+                    bot_loop
+                )
+                return fut.result(timeout=1200)
+            except Exception:
+                pass  # Fall through to direct HTTP upload fallback
 
-    app_inst = bot_entry["app"]
-    bot_loop = bot_entry["loop"]
-    if not bot_loop or bot_loop.is_closed():
-        return False, "Bot event loop is stopped."
-
-    fut = asyncio.run_coroutine_threadsafe(
-        send_large_file_split_telegram(app_inst.bot, chat_id, file_path, auto_split=auto_split, progress_callback=progress_callback),
-        bot_loop
-    )
-    return fut.result(timeout=1200)
+    # Direct high-resilience upload fallback via get_telegram_session()
+    return send_file_direct_requests(token, chat_id, file_path, auto_split=auto_split, progress_callback=progress_callback)
 
 def send_text_to_telegram_sync_bridge(token: str, chat_id: int, text: str) -> tuple[bool, str]:
     base_url = get_active_telegram_base_url()
@@ -1329,6 +1475,81 @@ def open_telegram_proxy(server: str, port: str, secret: str):
             webbrowser.open(tg_uri)
         except Exception:
             webbrowser.open(https_url)
+
+def fetch_solispirit_proxies(limit: int = 40) -> list[dict]:
+    """
+    Fetches fresh, high-speed MTProto proxies directly from SoliSpirit/mtproto repository:
+    https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt
+    Parses proxies, conducts concurrent TCP reachability/ping tests,
+    and returns a sorted list of live working proxies.
+    """
+    urls = [
+        "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt",
+        "https://raw.githubusercontent.com/SoliSpirit/mtproto/main/all_proxies.txt"
+    ]
+    raw_lines = []
+    for u in urls:
+        try:
+            req = urllib.request.Request(
+                u,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PCRemotePro/4.2"}
+            )
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                content = resp.read().decode("utf-8", errors="ignore")
+                for line in content.splitlines():
+                    line = line.strip()
+                    if ("tg://proxy?" in line or "t.me/proxy?" in line) and "server=" in line and "port=" in line:
+                        raw_lines.append(line)
+            if raw_lines:
+                break
+        except Exception:
+            continue
+
+    if not raw_lines:
+        return []
+
+    from urllib.parse import parse_qs
+    parsed = []
+    seen = set()
+    for line in raw_lines:
+        try:
+            q_part = line.split("?", 1)[1] if "?" in line else ""
+            qs = parse_qs(q_part)
+            server = qs.get("server", [""])[0].strip().rstrip(".")
+            port = qs.get("port", [""])[0].strip()
+            secret = qs.get("secret", [""])[0].strip()
+            if server and port and secret:
+                key = f"{server}:{port}"
+                if key not in seen:
+                    seen.add(key)
+                    parsed.append({
+                        "server": server,
+                        "port": port,
+                        "secret": secret,
+                        "link": f"tg://proxy?server={server}&port={port}&secret={secret}",
+                        "ping": 9999.0,
+                        "online": False
+                    })
+        except Exception:
+            continue
+
+    candidates = parsed[:limit]
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _ping(item):
+        try:
+            ok, lat, _ = test_proxy_ping(item["server"], int(item["port"]), timeout=2.2)
+            item["online"] = ok
+            item["ping"] = lat if ok else 9999.0
+        except Exception:
+            item["online"] = False
+            item["ping"] = 9999.0
+
+    with ThreadPoolExecutor(max_workers=14) as pool:
+        list(pool.map(_ping, candidates))
+
+    candidates.sort(key=lambda x: (0 if x["online"] else 1, x["ping"]))
+    return candidates
 
 def save_config(accounts_list, autostart=True, security_guard=None, download_folder=None, proxy=None):
     global SECURITY_GUARD_SETTINGS, DOWNLOADS_FOLDER, PROXY_SETTINGS
@@ -7343,7 +7564,7 @@ class MasterMiniApp(ctk.CTk):
         )
         btn_bottom_back.pack(fill="x", padx=10, pady=(4, 12))
 
-    # ----------------- Screen 7: MTProto & SOCKS5 Proxy Manager (Proxy 🛡️) -----------------
+    # ----------------- Screen 7: MTProto & SoliSpirit Proxy Manager (Proxy 🛡️) -----------------
     def setup_proxy_ui(self):
         # Header toolbar
         self.header_proxy = ctk.CTkFrame(self.frame_proxy, fg_color="transparent")
@@ -7368,21 +7589,21 @@ class MasterMiniApp(ctk.CTk):
 
         lbl_title = ctk.CTkLabel(
             self.header_proxy,
-            text="Proxy & Network Shield",
+            text="Proxy Shield & MTProto Manager",
             font=ctk.CTkFont(size=13, weight="bold")
         )
         lbl_title.pack(side="left", padx=4)
 
         # Scrollable container for proxy controls
-        scroll_proxy = ctk.CTkScrollableFrame(self.frame_proxy, height=520)
-        scroll_proxy.pack(fill="both", expand=True, padx=6, pady=(0, 4))
+        self.scroll_proxy = ctk.CTkScrollableFrame(self.frame_proxy, height=520)
+        self.scroll_proxy.pack(fill="both", expand=True, padx=6, pady=(0, 4))
 
-        # --- Status Card ---
-        card_status = ctk.CTkFrame(scroll_proxy, fg_color="#18202b", corner_radius=8, border_width=1, border_color="#0088cc")
+        # --- Card 1: Active Status & Toggle Card ---
+        card_status = ctk.CTkFrame(self.scroll_proxy, fg_color="#18202b", corner_radius=8, border_width=1, border_color="#0088cc")
         card_status.pack(fill="x", padx=4, pady=(2, 6))
 
         row_status = ctk.CTkFrame(card_status, fg_color="transparent")
-        row_status.pack(fill="x", padx=10, pady=8)
+        row_status.pack(fill="x", padx=10, pady=(8, 4))
 
         lbl_status_title = ctk.CTkLabel(
             row_status,
@@ -7394,539 +7615,368 @@ class MasterMiniApp(ctk.CTk):
 
         self.lbl_proxy_live_status = ctk.CTkLabel(
             row_status,
-            text="● Idle / Not Tested",
+            text="● Direct Mode (No Proxy)",
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color="#aaaaaa"
         )
         self.lbl_proxy_live_status.pack(side="right")
 
-        self.lbl_proxy_ping_detail = ctk.CTkLabel(
+        self.lbl_proxy_active_info = ctk.CTkLabel(
             card_status,
-            text="Click 'Test Connection' below to check live socket latency.",
+            text="Operating in direct connection mode. Connect to a proxy below if Telegram is blocked.",
+            font=ctk.CTkFont(size=9),
+            text_color="#888888",
+            wraplength=330,
+            justify="left"
+        )
+        self.lbl_proxy_active_info.pack(anchor="w", padx=10, pady=(0, 6))
+
+        row_status_btn = ctk.CTkFrame(card_status, fg_color="transparent")
+        row_status_btn.pack(fill="x", padx=10, pady=(0, 8))
+
+        btn_disable_proxy = ctk.CTkButton(
+            row_status_btn,
+            text="🔌 Disable Proxy (الرجوع للاتصال المباشر)",
+            height=26,
+            fg_color="#333333",
+            hover_color="#dc3545",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self.disable_proxy_settings_gui
+        )
+        btn_disable_proxy.pack(fill="x")
+
+        # --- Card 2: SoliSpirit MTProto Live Feed (تحديثات البروكسي الحية) ---
+        card_soli = ctk.CTkFrame(self.scroll_proxy, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
+        card_soli.pack(fill="x", padx=4, pady=(0, 6))
+
+        row_soli_head = ctk.CTkFrame(card_soli, fg_color="transparent")
+        row_soli_head.pack(fill="x", padx=10, pady=(6, 2))
+
+        lbl_soli_title = ctk.CTkLabel(
+            row_soli_head,
+            text="🌐 SoliSpirit/mtproto Live Feed:",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#00bcd4"
+        )
+        lbl_soli_title.pack(side="left")
+
+        self.btn_refresh_soli = ctk.CTkButton(
+            card_soli,
+            text="🔄 جلب وتحديث أحدث البروكسيات (Fetch Live Proxies)",
+            height=32,
+            fg_color="#0088cc",
+            hover_color="#006699",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self.refresh_solispirit_proxies_gui
+        )
+        self.btn_refresh_soli.pack(fill="x", padx=10, pady=(4, 4))
+
+        self.lbl_soli_fetch_status = ctk.CTkLabel(
+            card_soli,
+            text="Press button above to load verified live proxies from SoliSpirit GitHub.",
             font=ctk.CTkFont(size=9),
             text_color="#888888"
         )
-        self.lbl_proxy_ping_detail.pack(anchor="w", padx=10, pady=(0, 6))
+        self.lbl_soli_fetch_status.pack(anchor="w", padx=10, pady=(0, 6))
 
-        # --- Card 0: Mode Selection & Quick Local Detection ---
-        card_mode = ctk.CTkFrame(scroll_proxy, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
-        card_mode.pack(fill="x", padx=4, pady=(0, 6))
+        # Dynamic Container inside Card 2
+        self.frame_soli_list = ctk.CTkFrame(card_soli, fg_color="transparent")
+        self.frame_soli_list.pack(fill="x", padx=6, pady=(0, 6))
 
-        lbl_mode_title = ctk.CTkLabel(
-            card_mode,
-            text="🛡️ Proxy Protocol / نوع الاتصال:",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            text_color="#00bcd4"
+        # --- Card 3: Bot API Censorship Bypass (تجاوز حجب تيليجرام للبوت في العراق) ---
+        card_bot_bypass = ctk.CTkFrame(self.scroll_proxy, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
+        card_bot_bypass.pack(fill="x", padx=4, pady=(0, 6))
+
+        lbl_bypass_title = ctk.CTkLabel(
+            card_bot_bypass,
+            text="🛡️ ربط وتجاوز حجب Bot API (العراق):",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#28a748"
         )
-        lbl_mode_title.pack(anchor="w", padx=10, pady=(6, 2))
+        lbl_bypass_title.pack(anchor="w", padx=10, pady=(6, 2))
 
-        row_mode = ctk.CTkFrame(card_mode, fg_color="transparent")
-        row_mode.pack(fill="x", padx=10, pady=(0, 6))
-
-        self.combo_proxy_proto = ctk.CTkOptionMenu(
-            row_mode,
-            values=["SOCKS5 (Bot & PC)", "HTTP Proxy", "MTProto (TG Desktop)", "Reverse Proxy Mirror"],
-            height=28,
-            font=ctk.CTkFont(size=10, weight="bold"),
-            command=self.on_proxy_proto_changed
+        lbl_bypass_sub = ctk.CTkLabel(
+            card_bot_bypass,
+            text="لتشغيل البوت وإرسال الرسائل والملفات داخل العراق بدون حجب، اختر طريقة الاتصال:",
+            font=ctk.CTkFont(size=9),
+            text_color="#aaaaaa",
+            wraplength=330,
+            justify="left"
         )
-        self.combo_proxy_proto.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        lbl_bypass_sub.pack(anchor="w", padx=10, pady=(0, 4))
 
-        btn_auto_detect = ctk.CTkButton(
-            row_mode,
-            text="🔍 Auto-Detect",
-            width=85,
+        # A: Auto-Detect Local VPN (V2Ray / Clash)
+        btn_detect_vpn = ctk.CTkButton(
+            card_bot_bypass,
+            text="🔍 فحص والاتصال بـ VPN الحاسوب (Detect V2Ray / Clash)",
             height=28,
             fg_color="#17a2b8",
             hover_color="#138496",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self.auto_detect_local_vpn_gui
+        )
+        btn_detect_vpn.pack(fill="x", padx=10, pady=(2, 4))
+
+        self.lbl_vpn_detected_status = ctk.CTkLabel(
+            card_bot_bypass,
+            text="يفحص منافذ V2Ray (10808) أو Clash (7890) المشغلة على حاسوبك تلقائياً.",
+            font=ctk.CTkFont(size=9),
+            text_color="#777777"
+        )
+        self.lbl_vpn_detected_status.pack(anchor="w", padx=10, pady=(0, 6))
+
+        # B: Reverse Proxy Mirror
+        lbl_mirror_title = ctk.CTkLabel(
+            card_bot_bypass,
+            text="🌐 خادم بديل مباشر لـ api.telegram.org (Reverse Proxy Mirror):",
             font=ctk.CTkFont(size=9, weight="bold"),
-            command=self.auto_detect_local_proxy_gui
+            text_color="#cccccc"
         )
-        btn_auto_detect.pack(side="right")
+        lbl_mirror_title.pack(anchor="w", padx=10, pady=(2, 2))
 
-        # --- Card 1: Quick Auto-Fill from Link ---
-        card_import = ctk.CTkFrame(scroll_proxy, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
-        card_import.pack(fill="x", padx=4, pady=(0, 6))
+        row_mirror = ctk.CTkFrame(card_bot_bypass, fg_color="transparent")
+        row_mirror.pack(fill="x", padx=10, pady=(0, 4))
 
-        lbl_import_title = ctk.CTkLabel(
-            card_import,
-            text="⚡ Quick Auto-Fill from Telegram Link:",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            text_color="#00bcd4"
-        )
-        lbl_import_title.pack(anchor="w", padx=10, pady=(6, 2))
-
-        row_import = ctk.CTkFrame(card_import, fg_color="transparent")
-        row_import.pack(fill="x", padx=10, pady=(0, 6))
-
-        self.entry_proxy_link = ctk.CTkEntry(
-            row_import,
-            placeholder_text="tg://proxy?server=... or socks5://... or http://...",
-            font=ctk.CTkFont(size=10),
-            height=28
-        )
-        self.entry_proxy_link.pack(side="left", fill="x", expand=True, padx=(0, 4))
-
-        btn_parse_link = ctk.CTkButton(
-            row_import,
-            text="📥 Auto-Fill",
-            width=70,
-            height=28,
-            fg_color="#0088cc",
-            hover_color="#006699",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            command=self.auto_fill_proxy_from_link
-        )
-        btn_parse_link.pack(side="right")
-
-        # --- Card 2: Proxy Server Settings (Host, Port, Secret) ---
-        self.card_fields = ctk.CTkFrame(scroll_proxy, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
-        self.card_fields.pack(fill="x", padx=4, pady=(0, 6))
-
-        # 1. Server / Host (الخادم)
-        self.lbl_proxy_server = ctk.CTkLabel(
-            self.card_fields,
-            text="Server / Host (الخادم):",
-            font=ctk.CTkFont(size=10, weight="bold")
-        )
-        self.lbl_proxy_server.pack(anchor="w", padx=10, pady=(6, 2))
-
-        row_server = ctk.CTkFrame(self.card_fields, fg_color="transparent")
-        row_server.pack(fill="x", padx=10, pady=(0, 4))
-
-        self.entry_proxy_server = ctk.CTkEntry(
-            row_server,
-            placeholder_text="e.g. 127.0.0.1 or 149.154.175.50 or proxy.com",
-            font=ctk.CTkFont(size=10),
-            height=28
-        )
-        self.entry_proxy_server.pack(side="left", fill="x", expand=True, padx=(0, 4))
-
-        btn_paste_server = ctk.CTkButton(
-            row_server,
-            text="📋",
-            width=28,
-            height=28,
-            fg_color="#333333",
-            hover_color="#444444",
-            command=lambda: self._paste_into(self.entry_proxy_server)
-        )
-        btn_paste_server.pack(side="left", padx=(0, 2))
-
-        btn_clear_server = ctk.CTkButton(
-            row_server,
-            text="✖",
-            width=28,
-            height=28,
-            fg_color="#dc3545",
-            hover_color="#c82333",
-            command=lambda: self.entry_proxy_server.delete(0, "end")
-        )
-        btn_clear_server.pack(side="left")
-
-        # 2. Port (المنفذ)
-        self.lbl_proxy_port = ctk.CTkLabel(
-            self.card_fields,
-            text="Port (المنفذ):",
-            font=ctk.CTkFont(size=10, weight="bold")
-        )
-        self.lbl_proxy_port.pack(anchor="w", padx=10, pady=(4, 2))
-
-        row_port = ctk.CTkFrame(self.card_fields, fg_color="transparent")
-        row_port.pack(fill="x", padx=10, pady=(0, 4))
-
-        self.entry_proxy_port = ctk.CTkEntry(
-            row_port,
-            placeholder_text="e.g. 10808 (V2Ray) or 7890 (Clash) or 443",
-            font=ctk.CTkFont(size=10),
-            height=28
-        )
-        self.entry_proxy_port.pack(side="left", fill="x", expand=True, padx=(0, 4))
-
-        btn_paste_port = ctk.CTkButton(
-            row_port,
-            text="📋",
-            width=28,
-            height=28,
-            fg_color="#333333",
-            hover_color="#444444",
-            command=lambda: self._paste_into(self.entry_proxy_port)
-        )
-        btn_paste_port.pack(side="left", padx=(0, 2))
-
-        btn_clear_port = ctk.CTkButton(
-            row_port,
-            text="✖",
-            width=28,
-            height=28,
-            fg_color="#dc3545",
-            hover_color="#c82333",
-            command=lambda: self.entry_proxy_port.delete(0, "end")
-        )
-        btn_clear_port.pack(side="left")
-
-        # 3. Secret / Key / Password (المفتاح أو كلمة المرور)
-        self.lbl_proxy_secret = ctk.CTkLabel(
-            self.card_fields,
-            text="Secret / Password (المفتاح أو كلمة المرور):",
-            font=ctk.CTkFont(size=10, weight="bold")
-        )
-        self.lbl_proxy_secret.pack(anchor="w", padx=10, pady=(4, 2))
-
-        row_secret = ctk.CTkFrame(self.card_fields, fg_color="transparent")
-        row_secret.pack(fill="x", padx=10, pady=(0, 4))
-
-        self.is_proxy_secret_visible = False
-        self.entry_proxy_secret = ctk.CTkEntry(
-            row_secret,
-            placeholder_text="Optional password / secret key",
-            font=ctk.CTkFont(size=10),
-            height=28,
-            show="*"
-        )
-        self.entry_proxy_secret.pack(side="left", fill="x", expand=True, padx=(0, 4))
-
-        self.btn_eye_proxy_secret = ctk.CTkButton(
-            row_secret,
-            text="👁️",
-            width=28,
-            height=28,
-            fg_color="#333333",
-            hover_color="#444444",
-            command=self.toggle_proxy_secret_visibility
-        )
-        self.btn_eye_proxy_secret.pack(side="left", padx=(0, 2))
-
-        btn_paste_secret = ctk.CTkButton(
-            row_secret,
-            text="📋",
-            width=28,
-            height=28,
-            fg_color="#333333",
-            hover_color="#444444",
-            command=lambda: self._paste_into(self.entry_proxy_secret)
-        )
-        btn_paste_secret.pack(side="left", padx=(0, 2))
-
-        btn_clear_secret = ctk.CTkButton(
-            row_secret,
-            text="✖",
-            width=28,
-            height=28,
-            fg_color="#dc3545",
-            hover_color="#c82333",
-            command=lambda: self.entry_proxy_secret.delete(0, "end")
-        )
-        btn_clear_secret.pack(side="left")
-
-        # 4. Reverse Proxy Mirror URL (for Reverse Proxy mode)
-        self.lbl_proxy_reverse = ctk.CTkLabel(
-            self.card_fields,
-            text="🌐 Reverse Proxy URL (رابط الخادم البديل المباشر):",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            text_color="#28a748"
-        )
-
-        self.row_reverse = ctk.CTkFrame(self.card_fields, fg_color="transparent")
-
-        self.entry_proxy_reverse = ctk.CTkEntry(
-            self.row_reverse,
+        self.entry_reverse_mirror = ctk.CTkEntry(
+            row_mirror,
             placeholder_text="https://your-mirror.workers.dev",
             font=ctk.CTkFont(size=10),
             height=28
         )
-        self.entry_proxy_reverse.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self.entry_reverse_mirror.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
-        btn_paste_rev = ctk.CTkButton(
-            self.row_reverse,
-            text="📋",
-            width=28,
+        btn_apply_mirror = ctk.CTkButton(
+            row_mirror,
+            text="⚡ تفعيل البديل",
+            width=80,
             height=28,
-            fg_color="#333333",
-            hover_color="#444444",
-            command=lambda: self._paste_into(self.entry_proxy_reverse)
-        )
-        btn_paste_rev.pack(side="left", padx=(0, 2))
-
-        btn_clear_rev = ctk.CTkButton(
-            self.row_reverse,
-            text="✖",
-            width=28,
-            height=28,
-            fg_color="#dc3545",
-            hover_color="#c82333",
-            command=lambda: self.entry_proxy_reverse.delete(0, "end")
-        )
-        btn_clear_rev.pack(side="left")
-
-        # --- Card 3: Action Buttons (Test, Save, Connect in Telegram) ---
-        card_actions = ctk.CTkFrame(scroll_proxy, fg_color="transparent")
-        card_actions.pack(fill="x", padx=4, pady=(2, 6))
-
-        self.btn_test_proxy = ctk.CTkButton(
-            card_actions,
-            text="🧪 Test Connection (فحص الاتصال والطبقة المحمية)",
-            height=30,
-            fg_color="#f39c12",
-            hover_color="#d68910",
-            text_color="#000000",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            command=self.test_proxy_connection_gui
-        )
-        self.btn_test_proxy.pack(fill="x", pady=(0, 4))
-
-        self.btn_save_proxy = ctk.CTkButton(
-            card_actions,
-            text="💾 Save & Activate Proxy Layer (حفظ وتفعيل الطبقة للتطبيق بالكامل)",
-            height=30,
             fg_color="#28a748",
             hover_color="#218838",
-            text_color="#FFFFFF",
             font=ctk.CTkFont(size=10, weight="bold"),
-            command=self.save_proxy_settings_gui
+            command=self.activate_reverse_mirror_gui
         )
-        self.btn_save_proxy.pack(fill="x", pady=(0, 4))
+        btn_apply_mirror.pack(side="right")
 
-        self.btn_disable_proxy = ctk.CTkButton(
-            card_actions,
-            text="🔌 Disable Proxy / Direct Connection (تعطيل البروكسي والعودة للاتصال المباشر)",
+        # C: Live Bot Connection Diagnostic Button
+        self.btn_test_bot_api = ctk.CTkButton(
+            card_bot_bypass,
+            text="🧪 فحص اتصال البوت الفعلي الآن (Test Bot Connection)",
             height=28,
-            fg_color="#444444",
-            hover_color="#555555",
-            text_color="#FFFFFF",
-            font=ctk.CTkFont(size=9, weight="bold"),
-            command=self.disable_proxy_settings_gui
-        )
-        self.btn_disable_proxy.pack(fill="x", pady=(0, 4))
-
-        self.btn_open_tg_proxy = ctk.CTkButton(
-            card_actions,
-            text="🚀 Connect Telegram Desktop via this Proxy (الاتصال في تيليجرام ديسكتوب)",
-            height=30,
-            fg_color="#0088cc",
-            hover_color="#006699",
-            text_color="#FFFFFF",
+            fg_color="#ffc107",
+            hover_color="#e0a800",
+            text_color="#000000",
             font=ctk.CTkFont(size=10, weight="bold"),
-            command=self.launch_telegram_with_proxy
+            command=self.test_bot_api_live_gui
         )
-        self.btn_open_tg_proxy.pack(fill="x", pady=(0, 6))
+        self.btn_test_bot_api.pack(fill="x", padx=10, pady=(4, 4))
 
-        # In-window Toast / Notification label
+        self.lbl_bot_api_test_result = ctk.CTkLabel(
+            card_bot_bypass,
+            text="",
+            font=ctk.CTkFont(size=9, weight="bold"),
+            wraplength=330,
+            justify="left"
+        )
+        self.lbl_bot_api_test_result.pack(anchor="w", padx=10, pady=(0, 6))
+
+        # Floating Notification Message Toast
         self.lbl_proxy_msg = ctk.CTkLabel(
-            card_actions,
+            self.scroll_proxy,
             text="",
             font=ctk.CTkFont(size=10, weight="bold"),
-            text_color="#28a748",
-            wraplength=340
+            wraplength=330
         )
-        self.lbl_proxy_msg.pack(fill="x", pady=(0, 4))
+        self.lbl_proxy_msg.pack(padx=10, pady=(2, 6))
 
-        # --- Card 4: Official Proxy Channel (@ProxyMTProto) ---
-        card_channel = ctk.CTkFrame(scroll_proxy, fg_color="#18202b", corner_radius=8, border_width=1, border_color="#2b3b4f")
-        card_channel.pack(fill="x", padx=4, pady=(2, 6))
+    def refresh_solispirit_proxies_gui(self):
+        """Fetches live MTProto proxies from SoliSpirit/mtproto and displays them in the GUI."""
+        self.btn_refresh_soli.configure(state="disabled", text="⏳ جاري جلب وفحص البروكسيات من SoliSpirit...")
+        self.lbl_soli_fetch_status.configure(text="Downloading all_proxies.txt and conducting latency checks...", text_color="#f39c12")
 
-        lbl_ch_title = ctk.CTkLabel(
-            card_channel,
-            text="📢 Telegram MTProto Channel (@ProxyMTProto)",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            text_color="#00bcd4"
-        )
-        lbl_ch_title.pack(anchor="w", padx=10, pady=(6, 2))
+        def _worker():
+            proxies = fetch_solispirit_proxies(limit=30)
+            def _update():
+                self.btn_refresh_soli.configure(state="normal", text="🔄 جلب وتحديث أحدث البروكسيات (Fetch Live Proxies)")
+                for w in self.frame_soli_list.winfo_children():
+                    w.destroy()
 
-        lbl_ch_desc = ctk.CTkLabel(
-            card_channel,
-            text="Get updated high-speed MTProto proxies daily directly from @ProxyMTProto:\n"
-                 "احصل على أحدث سيرفرات البروكسي السريعة يومياً مجاناً:",
-            font=ctk.CTkFont(size=9),
-            justify="left",
-            wraplength=330,
-            text_color="#cccccc"
-        )
-        lbl_ch_desc.pack(anchor="w", padx=10, pady=(0, 6))
+                if not proxies:
+                    self.lbl_soli_fetch_status.configure(text="❌ Failed to fetch proxies. Check your internet connection.", text_color="#dc3545")
+                    return
 
-        row_ch_btns = ctk.CTkFrame(card_channel, fg_color="transparent")
-        row_ch_btns.pack(fill="x", padx=10, pady=(0, 8))
+                online_count = sum(1 for p in proxies if p.get("online"))
+                self.lbl_soli_fetch_status.configure(
+                    text=f"✅ Loaded {len(proxies)} proxies ({online_count} online & verified). Sorted by latency.",
+                    text_color="#28a748"
+                )
 
-        btn_open_ch = ctk.CTkButton(
-            row_ch_btns,
-            text="✈️ Open @ProxyMTProto in Telegram ↗",
-            height=28,
-            fg_color="#0088cc",
-            hover_color="#006699",
-            text_color="#FFFFFF",
-            font=ctk.CTkFont(size=9, weight="bold"),
-            command=lambda: webbrowser.open("https://t.me/ProxyMTProto")
-        )
-        btn_open_ch.pack(side="left", fill="x", expand=True, padx=(0, 4))
+                for p in proxies:
+                    card = ctk.CTkFrame(self.frame_soli_list, fg_color="#181818", corner_radius=6, border_width=1, border_color="#2c2c2c")
+                    card.pack(fill="x", pady=2)
 
-        btn_copy_ch = ctk.CTkButton(
-            row_ch_btns,
-            text="📋 Copy Link",
-            width=70,
-            height=28,
-            fg_color="#333333",
-            hover_color="#444444",
-            text_color="#FFFFFF",
-            font=ctk.CTkFont(size=9, weight="bold"),
-            command=self.copy_proxy_channel_link
-        )
-        btn_copy_ch.pack(side="right")
+                    row_top = ctk.CTkFrame(card, fg_color="transparent")
+                    row_top.pack(fill="x", padx=8, pady=(4, 2))
 
-        # Bottom Return Button
-        btn_bottom_back = ctk.CTkButton(
-            scroll_proxy,
-            text="◀ Back to Dashboard",
-            height=30,
-            fg_color="#333333",
-            hover_color="#444444",
-            text_color="#FFFFFF",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            command=self.show_dashboard
-        )
-        btn_bottom_back.pack(fill="x", padx=10, pady=(4, 12))
+                    server_display = f"{p['server']}:{p['port']}"
+                    lbl_srv = ctk.CTkLabel(row_top, text=server_display, font=ctk.CTkFont(size=10, weight="bold"), text_color="#FFFFFF")
+                    lbl_srv.pack(side="left")
 
-    def on_proxy_proto_changed(self, choice=None):
-        proto = self.combo_proxy_proto.get()
-        if "Reverse Proxy" in proto:
-            self.lbl_proxy_reverse.pack(anchor="w", padx=10, pady=(6, 2))
-            self.row_reverse.pack(fill="x", padx=10, pady=(0, 6))
-        else:
-            self.lbl_proxy_reverse.pack_forget()
-            self.row_reverse.pack_forget()
+                    if p.get("online"):
+                        ping_val = p.get("ping", 0.0)
+                        ping_col = "#28a748" if ping_val < 150 else ("#f39c12" if ping_val < 350 else "#dc3545")
+                        lbl_ping = ctk.CTkLabel(row_top, text=f"⚡ {ping_val:.0f} ms", font=ctk.CTkFont(size=9, weight="bold"), text_color=ping_col)
+                    else:
+                        lbl_ping = ctk.CTkLabel(row_top, text="● Offline", font=ctk.CTkFont(size=9), text_color="#888888")
+                    lbl_ping.pack(side="right")
 
-    def auto_detect_local_proxy_gui(self):
-        detected = detect_local_proxies()
-        if detected:
-            first = detected[0]
-            self.combo_proxy_proto.set("SOCKS5 (Bot & PC)" if first["proto"] == "SOCKS5" else "HTTP Proxy")
-            self.entry_proxy_server.delete(0, "end")
-            self.entry_proxy_server.insert(0, first["host"])
-            self.entry_proxy_port.delete(0, "end")
-            self.entry_proxy_port.insert(0, str(first["port"]))
-            self.on_proxy_proto_changed()
-            self._show_proxy_msg(f"✅ Auto-detected active {first['name']} on {first['host']}:{first['port']}!", "#28a748")
-            self.test_proxy_connection_gui()
-        else:
-            self._show_proxy_msg("ℹ️ No active local proxy detected on standard ports (10808, 7890, 8080). Please enter host and port manually.", "#e0a800")
+                    row_act = ctk.CTkFrame(card, fg_color="transparent")
+                    row_act.pack(fill="x", padx=8, pady=(0, 4))
 
-    def _paste_into(self, entry_widget):
-        try:
-            val = self.clipboard_get().strip()
-            if val:
-                entry_widget.delete(0, "end")
-                entry_widget.insert(0, val)
-        except Exception:
-            pass
+                    btn_open_tg = ctk.CTkButton(
+                        row_act,
+                        text="🚀 فتح في تيليجرام",
+                        width=100,
+                        height=24,
+                        fg_color="#0088cc",
+                        hover_color="#006699",
+                        font=ctk.CTkFont(size=9, weight="bold"),
+                        command=lambda px=p: open_telegram_proxy(px["server"], px["port"], px["secret"])
+                    )
+                    btn_open_tg.pack(side="left", padx=(0, 4))
 
-    def toggle_proxy_secret_visibility(self):
-        self.is_proxy_secret_visible = not self.is_proxy_secret_visible
-        self.entry_proxy_secret.configure(show="" if self.is_proxy_secret_visible else "*")
-        self.btn_eye_proxy_secret.configure(text="🔒" if self.is_proxy_secret_visible else "👁️")
+                    btn_conn_app = ctk.CTkButton(
+                        row_act,
+                        text="⚡ تفعيل للتطبيق",
+                        width=90,
+                        height=24,
+                        fg_color="#28a748",
+                        hover_color="#218838",
+                        font=ctk.CTkFont(size=9, weight="bold"),
+                        command=lambda px=p: self.activate_proxy_item(px)
+                    )
+                    btn_conn_app.pack(side="left", padx=(0, 4))
 
-    def auto_fill_proxy_from_link(self):
-        raw_link = self.entry_proxy_link.get().strip()
-        if not raw_link:
-            try:
-                raw_link = self.clipboard_get().strip()
-            except Exception:
-                pass
-        if not raw_link:
-            self._show_proxy_msg("⚠️ Please enter or copy a proxy link first.", "#e0a800")
-            return
-        proto, server, port, secret = parse_telegram_proxy_link(raw_link)
-        if proto == "MTPROTO":
-            self.combo_proxy_proto.set("MTProto (TG Desktop)")
-        elif proto == "HTTP":
-            self.combo_proxy_proto.set("HTTP Proxy")
-        elif proto == "REVERSE":
-            self.combo_proxy_proto.set("Reverse Proxy Mirror")
-            self.entry_proxy_reverse.delete(0, "end")
-            self.entry_proxy_reverse.insert(0, secret)
-        else:
-            self.combo_proxy_proto.set("SOCKS5 (Bot & PC)")
+                    btn_copy = ctk.CTkButton(
+                        row_act,
+                        text="📋 نسخ",
+                        width=45,
+                        height=24,
+                        fg_color="#333333",
+                        hover_color="#444444",
+                        font=ctk.CTkFont(size=9),
+                        command=lambda px=p: self._copy_link_to_clipboard(px.get("link", ""))
+                    )
+                    btn_copy.pack(side="right")
 
-        self.on_proxy_proto_changed()
-        if server:
-            self.entry_proxy_server.delete(0, "end")
-            self.entry_proxy_server.insert(0, server)
-        if port:
-            self.entry_proxy_port.delete(0, "end")
-            self.entry_proxy_port.insert(0, str(port))
-        if secret and proto != "REVERSE":
-            self.entry_proxy_secret.delete(0, "end")
-            self.entry_proxy_secret.insert(0, secret)
+            self.after(0, _update)
 
-        self._show_proxy_msg("✅ Proxy parameters auto-filled successfully!", "#28a748")
-        self.test_proxy_connection_gui()
+        threading.Thread(target=_worker, daemon=True).start()
 
-    def load_proxy_settings_into_ui(self):
+    def activate_proxy_item(self, proxy_data: dict):
+        """Activates and saves selected MTProto proxy."""
         global PROXY_SETTINGS
-        proto = PROXY_SETTINGS.get("proto", "SOCKS5").upper()
-        if proto == "MTPROTO":
-            self.combo_proxy_proto.set("MTProto (TG Desktop)")
-        elif proto == "HTTP":
-            self.combo_proxy_proto.set("HTTP Proxy")
-        elif proto == "REVERSE":
-            self.combo_proxy_proto.set("Reverse Proxy Mirror")
-        else:
-            self.combo_proxy_proto.set("SOCKS5 (Bot & PC)")
-
-        self.entry_proxy_server.delete(0, "end")
-        self.entry_proxy_server.insert(0, PROXY_SETTINGS.get("server", ""))
-        self.entry_proxy_port.delete(0, "end")
-        self.entry_proxy_port.insert(0, str(PROXY_SETTINGS.get("port", "")))
-        self.entry_proxy_secret.delete(0, "end")
-        self.entry_proxy_secret.insert(0, PROXY_SETTINGS.get("secret", ""))
-        self.entry_proxy_reverse.delete(0, "end")
-        self.entry_proxy_reverse.insert(0, PROXY_SETTINGS.get("reverse_url", ""))
-        self.on_proxy_proto_changed()
-        self.lbl_proxy_msg.configure(text="")
-
-        if PROXY_SETTINGS.get("enabled"):
-            self.lbl_proxy_live_status.configure(text="● Proxy Active (مفعل)", text_color="#28a748")
-            self.lbl_proxy_ping_detail.configure(text="Traffic is securely routed through the configured proxy layer.", text_color="#28a748")
-            self.test_proxy_connection_gui()
-        else:
-            self.lbl_proxy_live_status.configure(text="● Direct / No Proxy", text_color="#aaaaaa")
-            self.lbl_proxy_ping_detail.configure(text="Operating in direct connection mode.", text_color="#888888")
-
-    def save_proxy_settings_gui(self):
-        global PROXY_SETTINGS
-        choice = self.combo_proxy_proto.get()
-        if "MTProto" in choice:
-            proto = "MTPROTO"
-        elif "HTTP" in choice:
-            proto = "HTTP"
-        elif "Reverse" in choice:
-            proto = "REVERSE"
-        else:
-            proto = "SOCKS5"
-
-        server = self.entry_proxy_server.get().strip()
-        port = self.entry_proxy_port.get().strip()
-        secret = self.entry_proxy_secret.get().strip()
-        rev_url = self.entry_proxy_reverse.get().strip()
-
-        PROXY_SETTINGS["proto"] = proto
-        PROXY_SETTINGS["server"] = server
-        PROXY_SETTINGS["port"] = port
-        PROXY_SETTINGS["secret"] = secret
-        PROXY_SETTINGS["reverse_url"] = rev_url
-        PROXY_SETTINGS["enabled"] = bool((server and port) or (proto == "REVERSE" and rev_url))
+        PROXY_SETTINGS["server"] = proxy_data.get("server", "").strip()
+        PROXY_SETTINGS["port"] = str(proxy_data.get("port", "")).strip()
+        PROXY_SETTINGS["secret"] = proxy_data.get("secret", "").strip()
+        PROXY_SETTINGS["proto"] = "MTPROTO"
+        PROXY_SETTINGS["enabled"] = True
 
         save_config(self.accounts, autostart=self.config.get("autostart", True), proxy=PROXY_SETTINGS)
         apply_global_proxy_layer()
 
-        # Seamlessly reload active bots with the newly established proxy layer
         for tok in list(ACTIVE_BOT_REGISTRY.keys()):
             self.stop_bot(tok)
         self.after(600, self.start_all_bots)
 
-        self._show_proxy_msg("✅ Proxy layer saved & applied! Active bots reconnected through the proxy.", "#28a748")
-        self.lbl_proxy_live_status.configure(text="● Proxy Active (مفعل)", text_color="#28a748")
-        self.test_proxy_connection_gui()
+        self.load_proxy_settings_into_ui()
+        self._show_proxy_msg(f"✅ تم تفعيل بروكسي {proxy_data.get('server')}:{proxy_data.get('port')} للتطبيق!", "#28a748")
+
+    def auto_detect_local_vpn_gui(self):
+        """Auto-detects active local VPN / Proxy (V2Ray, Clash, Psiphon, etc.)."""
+        global PROXY_SETTINGS
+        detected = detect_local_proxies()
+        if detected:
+            first = detected[0]
+            PROXY_SETTINGS["proto"] = first["proto"]
+            PROXY_SETTINGS["server"] = first["host"]
+            PROXY_SETTINGS["port"] = first["port"]
+            PROXY_SETTINGS["secret"] = ""
+            PROXY_SETTINGS["enabled"] = True
+
+            save_config(self.accounts, autostart=self.config.get("autostart", True), proxy=PROXY_SETTINGS)
+            apply_global_proxy_layer()
+
+            for tok in list(ACTIVE_BOT_REGISTRY.keys()):
+                self.stop_bot(tok)
+            self.after(600, self.start_all_bots)
+
+            self.load_proxy_settings_into_ui()
+            msg = f"✅ تم اكتشاف وربط {first['name']} بنجاح على {first['host']}:{first['port']}!"
+            self.lbl_vpn_detected_status.configure(text=msg, text_color="#28a748")
+            self._show_proxy_msg(msg, "#28a748")
+        else:
+            msg = "⚠️ لم يتم العثور على VPN محلي مشغل (V2Ray على 10808 أو Clash على 7890 غير نشطين حالياً)."
+            self.lbl_vpn_detected_status.configure(text=msg, text_color="#e0a800")
+            self._show_proxy_msg(msg, "#e0a800")
+
+    def activate_reverse_mirror_gui(self):
+        """Activates custom or Cloudflare Reverse Proxy Mirror for Bot API."""
+        global PROXY_SETTINGS
+        url = self.entry_reverse_mirror.get().strip()
+        if not url:
+            self._show_proxy_msg("⚠️ يرجى إدخال رابط الخادم البديل أولاً.", "#e0a800")
+            return
+
+        if not url.startswith("http://") and not url.startswith("https://"):
+            url = "https://" + url
+
+        PROXY_SETTINGS["proto"] = "REVERSE"
+        PROXY_SETTINGS["reverse_url"] = url
+        PROXY_SETTINGS["enabled"] = True
+
+        save_config(self.accounts, autostart=self.config.get("autostart", True), proxy=PROXY_SETTINGS)
+        apply_global_proxy_layer()
+
+        for tok in list(ACTIVE_BOT_REGISTRY.keys()):
+            self.stop_bot(tok)
+        self.after(600, self.start_all_bots)
+
+        self.load_proxy_settings_into_ui()
+        self._show_proxy_msg(f"✅ تم تفعيل الخادم البديل ({url}) بنجاح!", "#28a748")
+
+    def test_bot_api_live_gui(self):
+        """Runs a real test request against Telegram Bot API using the configured proxy layer."""
+        if not self.accounts:
+            self.lbl_bot_api_test_result.configure(text="⚠️ لا يوجد حساب مضاف حالياً لفحص اتصاله.", text_color="#e0a800")
+            return
+
+        acc = self.active_account or self.accounts[0]
+        token = acc.get("token", "").strip()
+        cid = acc.get("chat_id")
+        if not token:
+            self.lbl_bot_api_test_result.configure(text="⚠️ يرجى إدخال توكن البوت في الحساب أولاً.", text_color="#e0a800")
+            return
+
+        self.btn_test_bot_api.configure(state="disabled", text="⏳ جاري فحص استجابة Telegram API...")
+        self.lbl_bot_api_test_result.configure(text="Testing live Telegram connection...", text_color="#00bcd4")
+
+        def _worker():
+            success, msg = test_telegram_connection(token, str(cid))
+            def _ui():
+                self.btn_test_bot_api.configure(state="normal", text="🧪 فحص اتصال البوت الفعلي الآن (Test Bot Connection)")
+                if success:
+                    self.lbl_bot_api_test_result.configure(text=f"🟢 اتصال ناجح بالبوت!\n{msg}", text_color="#28a748")
+                    self._show_proxy_msg("✅ Bot API is fully accessible!", "#28a748")
+                else:
+                    self.lbl_bot_api_test_result.configure(text=f"🔴 تعذر الوصول لـ Telegram API:\n{msg}", text_color="#dc3545")
+                    self._show_proxy_msg("❌ Connection Blocked. Enable Local VPN or Mirror.", "#dc3545")
+            self.after(0, _ui)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def disable_proxy_settings_gui(self):
+        """Disables proxy settings and restores direct connection mode."""
         global PROXY_SETTINGS
         PROXY_SETTINGS["enabled"] = False
         save_config(self.accounts, autostart=self.config.get("autostart", True), proxy=PROXY_SETTINGS)
@@ -7936,96 +7986,43 @@ class MasterMiniApp(ctk.CTk):
             self.stop_bot(tok)
         self.after(600, self.start_all_bots)
 
-        self._show_proxy_msg("🔌 Proxy disabled. Switched back to direct connection mode.", "#17a2b8")
-        self.lbl_proxy_live_status.configure(text="● Direct / No Proxy", text_color="#aaaaaa")
-        self.lbl_proxy_ping_detail.configure(text="Operating in direct connection mode.", text_color="#888888")
+        self.load_proxy_settings_into_ui()
+        self._show_proxy_msg("🔌 تم تعطيل البروكسي والرجوع للاتصال المباشر.", "#17a2b8")
 
-    def test_proxy_connection_gui(self):
-        choice = self.combo_proxy_proto.get()
-        server = self.entry_proxy_server.get().strip()
-        port_str = self.entry_proxy_port.get().strip()
-        rev_url = self.entry_proxy_reverse.get().strip()
+    def load_proxy_settings_into_ui(self):
+        """Refreshes status label in the proxy UI based on active PROXY_SETTINGS."""
+        global PROXY_SETTINGS
+        if PROXY_SETTINGS.get("enabled"):
+            proto = PROXY_SETTINGS.get("proto", "SOCKS5")
+            server = PROXY_SETTINGS.get("server", "")
+            port = PROXY_SETTINGS.get("port", "")
+            rev = PROXY_SETTINGS.get("reverse_url", "")
 
-        if "Reverse" in choice:
-            if not rev_url:
-                self._show_proxy_msg("⚠️ Please enter Reverse Proxy URL first.", "#e0a800")
-                return
-            self.btn_test_proxy.configure(state="disabled", text="⏳ Testing mirror...")
-            self.lbl_proxy_live_status.configure(text="● Testing Mirror...", text_color="#f39c12")
+            self.lbl_proxy_live_status.configure(text="● Proxy Active (البروكسي مفعل)", text_color="#28a748")
+            if proto == "REVERSE":
+                self.lbl_proxy_active_info.configure(
+                    text=f"Active Mirror: {rev}\n(Telegram Bot API routed via reverse proxy mirror)",
+                    text_color="#28a748"
+                )
+                self.entry_reverse_mirror.delete(0, "end")
+                self.entry_reverse_mirror.insert(0, rev)
+            else:
+                self.lbl_proxy_active_info.configure(
+                    text=f"Active Proxy: {proto}://{server}:{port}\n(Traffic routed through proxy shield)",
+                    text_color="#28a748"
+                )
+        else:
+            self.lbl_proxy_live_status.configure(text="● Direct Mode (اتصال مباشر)", text_color="#aaaaaa")
+            self.lbl_proxy_active_info.configure(
+                text="Operating in direct connection mode (No Proxy). If Telegram is blocked, use options below.",
+                text_color="#888888"
+            )
 
-            def worker_rev():
-                start = time.time()
-                try:
-                    r = requests.get(f"{rev_url.rstrip('/')}/bot", timeout=5)
-                    lat = round((time.time() - start) * 1000, 1)
-                    ok = (r.status_code in [200, 400, 404])
-                    def ui_rev():
-                        self.btn_test_proxy.configure(state="normal", text="🧪 Test Connection (فحص الاتصال والطبقة المحمية)")
-                        if ok:
-                            self.lbl_proxy_live_status.configure(text="● Connected (متصل)", text_color="#28a748")
-                            self.lbl_proxy_ping_detail.configure(text=f"⚡ Mirror is active! Latency: {lat} ms", text_color="#28a748")
-                            self._show_proxy_msg(f"✅ Reverse Proxy reached! Ping: {lat} ms", "#28a748")
-                        else:
-                            self.lbl_proxy_live_status.configure(text="● Disconnected (غير متصل)", text_color="#dc3545")
-                            self.lbl_proxy_ping_detail.configure(text=f"❌ HTTP Error ({r.status_code})", text_color="#dc3545")
-                    self.after(0, ui_rev)
-                except Exception as ex:
-                    def ui_err():
-                        self.btn_test_proxy.configure(state="normal", text="🧪 Test Connection (فحص الاتصال والطبقة المحمية)")
-                        self.lbl_proxy_live_status.configure(text="● Disconnected (غير متصل)", text_color="#dc3545")
-                        self.lbl_proxy_ping_detail.configure(text=f"❌ Failed to reach mirror: {ex}", text_color="#dc3545")
-                    self.after(0, ui_err)
-            threading.Thread(target=worker_rev, daemon=True).start()
-            return
-
-        if not server or not port_str:
-            self._show_proxy_msg("⚠️ Please enter server host and port first.", "#e0a800")
-            return
-
-        try:
-            port = int(port_str)
-        except ValueError:
-            self._show_proxy_msg("❌ Port must be an integer (e.g. 10808 or 443).", "#dc3545")
-            return
-
-        self.btn_test_proxy.configure(state="disabled", text="⏳ Testing connection...")
-        self.lbl_proxy_live_status.configure(text="● Testing...", text_color="#f39c12")
-        self.lbl_proxy_ping_detail.configure(text=f"Testing connection to {server}:{port}...", text_color="#f39c12")
-
-        def worker():
-            ok, latency, err = test_proxy_ping(server, port, timeout=4.0)
-            def update_ui():
-                self.btn_test_proxy.configure(state="normal", text="🧪 Test Connection (فحص الاتصال والطبقة المحمية)")
-                if ok:
-                    self.lbl_proxy_live_status.configure(text="● Connected (متصل)", text_color="#28a748")
-                    self.lbl_proxy_ping_detail.configure(text=f"⚡ Proxy reachable! Latency: {latency} ms", text_color="#28a748")
-                    self._show_proxy_msg(f"✅ Proxy server is reachable! Latency: {latency} ms", "#28a748")
-                else:
-                    self.lbl_proxy_live_status.configure(text="● Disconnected (غير متصل)", text_color="#dc3545")
-                    self.lbl_proxy_ping_detail.configure(text=f"❌ Failed to reach {server}:{port} ({err})", text_color="#dc3545")
-                    self._show_proxy_msg(f"❌ Connection failed: {err}", "#dc3545")
-            self.after(0, update_ui)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def launch_telegram_with_proxy(self):
-        server = self.entry_proxy_server.get().strip()
-        port = self.entry_proxy_port.get().strip()
-        secret = self.entry_proxy_secret.get().strip()
-
-        if not server or not port:
-            self._show_proxy_msg("⚠️ Please provide Server and Port first.", "#e0a800")
-            return
-
-        self.save_proxy_settings_gui()
-        open_telegram_proxy(server, port, secret)
-        self._show_proxy_msg("🚀 Telegram Desktop proxy link dispatched!", "#0088cc")
-
-    def copy_proxy_channel_link(self):
+    def _copy_link_to_clipboard(self, link_text: str):
         try:
             self.clipboard_clear()
-            self.clipboard_append("https://t.me/ProxyMTProto")
-            self._show_proxy_msg("📋 Channel link copied: https://t.me/ProxyMTProto", "#0088cc")
+            self.clipboard_append(link_text)
+            self._show_proxy_msg("📋 تم نسخ رابط البروكسي إلى الحافظة!", "#0088cc")
         except Exception:
             pass
 
@@ -8035,6 +8032,7 @@ class MasterMiniApp(ctk.CTk):
             self.after(5500, lambda: self.lbl_proxy_msg.configure(text="") if self.lbl_proxy_msg.cget("text") == text else None)
         except Exception:
             pass
+
 
     def run_connection_test(self):
         token = self.entry_token.get().strip()
