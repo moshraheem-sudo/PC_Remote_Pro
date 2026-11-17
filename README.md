@@ -44,7 +44,11 @@
 
 | الميزة الجديدة في v4.2 | الوصف التقني الفائق | الحالة |
 | :--- | :--- | :---: |
-| **🛡️ Built-in MTProto Proxy Manager** | مدير بروكسي MTProto مدمج يدعم السيرفر والمنفذ والمفتاح مع فحص مباشر لسرعة الاستجابة بالمللي ثانية (Ping Latency)، وتعبئة تلقائية، وفتح التيليجرام بضغطة زر ورابط مباشر لقناة [@ProxyMTProto](https://t.me/ProxyMTProto). | **مكتمل ومفعل** ✅ |
+| **🛡️ Native MTProto TDLib Engine & Iraq Bypass** | محرك اتصال مباشر بخوادم تليجرام الرسمية عبر **TDLib Native (tdjson.dll v1.8.70 x64)** لتجاوز حجب مزودي الخدمة وBot API داخل العراق والدول المحجوبة تماماً. | **مكتمل ومفعل** ✅ |
+| **🔄 Intelligent Dual-Mode Bot Architecture** | دعم كامل ونظامين متزامنين: نمط Direct Bot API (HTTPS العادي) ونمط MTProto via TDLib مع إمكانية التبديل التلقائي أو اليدوي دون فقدان أي ميزة. | **مكتمل ومفعل** ✅ |
+| **📡 Live Telegram Connection Monitor** | لوحة مراقبة حية متطورة على الواجهة الرئيسية تعرض حالة الاتصال، سرعة الاستجابة (Latency بالمللي ثانية)، الخادم النشط، حالة TDLib، وأوقات آخر نشاط استلام وإرسال. | **مكتمل ومفعل** ✅ |
+| **🔐 Windows DPAPI Hardware Credential Security** | تشفير وحماية تامة للتوكنات (Bot Tokens) وAPI Hash باستخدام خوارزمية Windows DPAPI المشفرة بمفاتيح عتاد المستخدم لمنع سرقة أو كشف الاعتماديات. | **مكتمل ومفعل** ✅ |
+| **⚡ Multi-Source Auto-Failover Proxy Manager** | تجميع واختبار تلقائي فائق السرعة لأحدث بروكسيات MTProto من مصادر متعددة (`SoliSpirit` و `mtproto-auto-proxies`) مع استبدال البروكسي لحظياً عند الانقطاع. | **مكتمل ومفعل** ✅ |
 | **ℹ️ Interactive In-App Setup Guide** | شاشة إرشادات متكاملة بنقاط واضحة بالإنجليزية مع أزرار مباشرة لفتح [@BotFather](https://t.me/BotFather) و [@userinfobot](https://t.me/userinfobot) في تيليجرام لجلب التوكن والـ Chat ID فوراً. | **مكتمل ومفعل** ✅ |
 | **📁 Separated Files Hub & Real-time Text Hub** | فصل شاشة الإعدادات (`Manage ⚙️`) عن مركز الملفات والرسائل (`Files Hub 📁`) مع دعم السحب والإفلات (Drag & Drop) والنسخ اللحظي إلى الحافظة. | **مكتمل ومفعل** ✅ |
 | **⚡ 200MB File Transfers with Auto-Split** | رفع الحد الأقصى للملفات إلى 200 ميجابايت مع تجزئة الملفات الكبيرة تلقائياً وضغطها ودعم البث المباشر حتى 600 ثانية لمنع انتهاء المهلة. | **مكتمل ومفعل** ✅ |

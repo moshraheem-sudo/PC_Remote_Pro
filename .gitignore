@@ -13,8 +13,19 @@ Output/
 *.zip
 0.26.0
 
+# User credentials and sensitive runtime state
+accounts_config.json
+accounts_config.json.bak
+*.db
+*.log
+mtproxy_cache.json
+tdlib_db/
+temp_inspect/
+temp_tdlib_test/
+
 # IDE / OS
 .vscode/
 .idea/
 Thumbs.db
 Desktop.ini
+tdlib_bin/
