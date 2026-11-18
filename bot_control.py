@@ -41,8 +41,7 @@ REQUIRED_LIBS = {
     "telegram": "python-telegram-bot",
     "pystray": "pystray",
     "cv2": "opencv-python",
-    "windnd": "windnd",
-    "requests": "requests"
+    "windnd": "windnd"
 }
 
 missing_libs = []
@@ -59,7 +58,6 @@ if missing_libs:
         pass
 
 # ----------------- 3. Core Imports -----------------
-import requests
 import re
 import json
 import time
@@ -81,7 +79,7 @@ import urllib.request
 import winreg
 from datetime import datetime
 import psutil
-from PIL import ImageGrab, Image, ImageDraw, ImageFilter
+from PIL import ImageGrab, Image, ImageDraw
 import tkinter as tk
 import customtkinter as ctk
 import tkinter.messagebox as messagebox
@@ -117,36 +115,6 @@ from telegram.ext import (
     ContextTypes
 )
 from telegram.request import HTTPXRequest
-
-# ----------------- Native Telegram MTProto TDLib Engine -----------------
-try:
-    from telegram_transport import (
-        encrypt_credential,
-        decrypt_credential,
-        mask_secret,
-        migrate_accounts_credentials,
-        clean_hostname,
-        normalize_mtproto_secret,
-        parse_proxy_string,
-        MTProxySources,
-        MTProxyManager,
-        TDLibClient,
-        TDLibBotAuth,
-        TelegramBotAdapter,
-        GLOBAL_PROXY_MANAGER
-    )
-    HAS_TDLIB_TRANSPORT = True
-except Exception as e:
-    HAS_TDLIB_TRANSPORT = False
-    print(f"[Warning] Failed to load telegram_transport: {e}")
-
-TELEGRAM_CONNECTION_SETTINGS = {
-    "api_id": "2040",
-    "api_hash": "b18441a1ff607e10a989891a5462e627",
-    "mode": "direct",
-    "enable_mtproto": False,
-    "auto_proxy": True
-}
 
 try:
     import pystray
@@ -510,11 +478,9 @@ async def send_large_file_split_telegram(bot, chat_id: int, file_path: str, auto
             try:
                 if progress_callback:
                     progress_callback(0.5, f"Retrying high-speed stream upload: {orig_name}...")
-                sess = get_telegram_session()
-                base_url = get_active_telegram_base_url()
                 with open(file_path, "rb") as fl:
-                    r = sess.post(
-                        f"{base_url}/bot{bot.token}/sendDocument",
+                    r = requests.post(
+                        f"https://api.telegram.org/bot{bot.token}/sendDocument",
                         data={"chat_id": chat_id, "caption": f"📁 File sent from PC:\n{orig_name} ({size_mb:.1f} MB)"},
                         files={"document": (orig_name, fl, "application/octet-stream")},
                         timeout=600
@@ -564,11 +530,9 @@ async def send_large_file_split_telegram(bot, chat_id: int, file_path: str, auto
                         connect_timeout=60.0
                     )
             except Exception:
-                sess = get_telegram_session()
-                base_url = get_active_telegram_base_url()
                 with open(zip_path, "rb") as fl:
-                    sess.post(
-                        f"{base_url}/bot{bot.token}/sendDocument",
+                    requests.post(
+                        f"https://api.telegram.org/bot{bot.token}/sendDocument",
                         data={"chat_id": chat_id, "caption": f"🗜️ Compressed: {zip_name} ({zip_mb:.1f} MB)"},
                         files={"document": (zip_name, fl, "application/octet-stream")},
                         timeout=600
@@ -628,11 +592,9 @@ async def send_large_file_split_telegram(bot, chat_id: int, file_path: str, auto
                             connect_timeout=60.0
                         )
                 except Exception:
-                    sess = get_telegram_session()
-                    base_url = get_active_telegram_base_url()
                     with open(part_path, "rb") as pf:
-                        sess.post(
-                            f"{base_url}/bot{bot.token}/sendDocument",
+                        requests.post(
+                            f"https://api.telegram.org/bot{bot.token}/sendDocument",
                             data={"chat_id": chat_id, "caption": f"📦 Part [{part_num}/{total_parts}] of: {orig_name}"},
                             files={"document": (part_name, pf, "application/octet-stream")},
                             timeout=600
@@ -678,11 +640,9 @@ async def send_large_file_split_telegram(bot, chat_id: int, file_path: str, auto
                     connect_timeout=60.0
                 )
         except Exception:
-            sess = get_telegram_session()
-            base_url = get_active_telegram_base_url()
             with open(bat_path, "rb") as bf:
-                sess.post(
-                    f"{base_url}/bot{bot.token}/sendDocument",
+                requests.post(
+                    f"https://api.telegram.org/bot{bot.token}/sendDocument",
                     data={"chat_id": chat_id, "caption": f"Recombine script for: {orig_name}"},
                     files={"document": (bat_name, bf, "application/octet-stream")},
                     timeout=600
@@ -700,237 +660,53 @@ async def send_large_file_split_telegram(bot, chat_id: int, file_path: str, auto
         except Exception:
             pass
 
-def send_file_direct_requests(token: str, chat_id: int, file_path: str, auto_split: bool = True, progress_callback=None) -> tuple[bool, str]:
-    """
-    Direct HTTP multipart file upload fallback using get_telegram_session().
-    Guarantees file delivery even when background bot polling is offline or reconnecting.
-    Handles < 48MB direct, and > 48MB with auto zip-compression and chunk splitting.
-    """
-    if not os.path.exists(file_path):
-        return False, "File not found."
-
-    orig_name = os.path.basename(file_path)
-    file_size = os.path.getsize(file_path)
-    size_mb = file_size / (1024 * 1024)
-
-    if file_size > 200 * 1024 * 1024:
-        return False, f"File '{orig_name}' ({size_mb:.1f} MB) exceeds maximum allowed size of 200 MB."
-
-    sess = get_telegram_session()
-    base_url = get_active_telegram_base_url()
-
-    # Under 48 MB or auto_split is False:
-    if file_size <= 48 * 1024 * 1024 or not auto_split:
-        if progress_callback:
-            progress_callback(0.3, f"Uploading: {orig_name} ({size_mb:.1f} MB)...")
-        try:
-            with open(file_path, "rb") as fl:
-                r = sess.post(
-                    f"{base_url}/bot{token}/sendDocument",
-                    data={"chat_id": chat_id, "caption": f"📁 [Sent from PC]:\n{orig_name} ({size_mb:.1f} MB)"},
-                    files={"document": (orig_name, fl, "application/octet-stream")},
-                    timeout=(5.0, 300.0)
-                )
-            if r.status_code == 200:
-                if progress_callback:
-                    progress_callback(1.0, f"✅ Successfully sent: {orig_name}")
-                record_transfer(orig_name, file_path, file_size, direction="sent", chat_id=chat_id)
-                return True, "File sent successfully via direct stream."
-            else:
-                return False, f"Telegram API error ({r.status_code}): {r.text}"
-        except Exception as e:
-            return False, f"Direct upload error: {e}"
-
-    # Over 48 MB: Try Zip compression first, then chunk splitting if needed
-    if progress_callback:
-        progress_callback(0.1, f"File exceeds 50MB ({size_mb:.1f} MB). Auto-compressing...")
-
-    temp_dir = tempfile.mkdtemp(prefix="pcremote_direct_")
-    try:
-        zip_name = f"{os.path.splitext(orig_name)[0]}.zip"
-        zip_path = os.path.join(temp_dir, zip_name)
-        with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            zf.write(file_path, arcname=orig_name)
-
-        compressed_size = os.path.getsize(zip_path)
-        comp_mb = compressed_size / (1024 * 1024)
-
-        if compressed_size <= 48 * 1024 * 1024:
-            if progress_callback:
-                progress_callback(0.5, f"Uploading compressed file ({comp_mb:.1f} MB)...")
-            with open(zip_path, "rb") as fl:
-                r = sess.post(
-                    f"{base_url}/bot{token}/sendDocument",
-                    data={"chat_id": chat_id, "caption": f"🗜️ Auto-compressed ({size_mb:.1f}MB ➔ {comp_mb:.1f}MB):\n{orig_name}"},
-                    files={"document": (zip_name, fl, "application/zip")},
-                    timeout=(5.0, 300.0)
-                )
-            if r.status_code == 200:
-                if progress_callback:
-                    progress_callback(1.0, f"✅ Successfully sent: {orig_name}")
-                record_transfer(orig_name, file_path, file_size, direction="sent", chat_id=chat_id)
-                return True, "Compressed file sent successfully."
-
-        # If still > 48MB, split into 45MB chunks
-        CHUNK_SIZE = 45 * 1024 * 1024
-        total_parts = math.ceil(file_size / CHUNK_SIZE)
-        if progress_callback:
-            progress_callback(0.2, f"Splitting into {total_parts} parts...")
-
-        sess.post(
-            f"{base_url}/bot{token}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": f"📦 Large file exceeds 50MB ({size_mb:.1f} MB):\n📁 File: {orig_name}\n🔢 Split into: {total_parts} parts (each <= 45MB)\n⏳ Uploading parts sequentially..."
-            },
-            timeout=(4.0, 15.0)
-        )
-
-        part_num = 1
-        with open(file_path, "rb") as src:
-            while True:
-                chunk = src.read(CHUNK_SIZE)
-                if not chunk:
-                    break
-                part_name = f"{orig_name}.part{part_num:03d}"
-                part_path = os.path.join(temp_dir, part_name)
-                with open(part_path, "wb") as pf:
-                    pf.write(chunk)
-                part_mb = len(chunk) / (1024 * 1024)
-                pct = 0.2 + (0.7 * (part_num / total_parts))
-                if progress_callback:
-                    progress_callback(pct, f"Uploading part {part_num} of {total_parts} ({part_mb:.1f} MB)...")
-
-                with open(part_path, "rb") as pf:
-                    r = sess.post(
-                        f"{base_url}/bot{token}/sendDocument",
-                        data={
-                            "chat_id": chat_id,
-                            "caption": f"📦 Part [{part_num}/{total_parts}] of: {orig_name}\n📊 Part size: {part_mb:.1f} MB (Total: {size_mb:.1f} MB)"
-                        },
-                        files={"document": (part_name, pf, "application/octet-stream")},
-                        timeout=(5.0, 300.0)
-                    )
-                if r.status_code != 200:
-                    return False, f"Part {part_num} upload failed ({r.status_code}): {r.text}"
-                part_num += 1
-
-        sess.post(
-            f"{base_url}/bot{token}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": f"✅ All {total_parts} parts of `{orig_name}` uploaded successfully!\n\n💡 You can recombine these parts back into the original file anytime from PC Remote Pro Files Hub."
-            },
-            timeout=(4.0, 15.0)
-        )
-        if progress_callback:
-            progress_callback(1.0, f"✅ All {total_parts} parts sent successfully!")
-        record_transfer(orig_name, file_path, file_size, direction="sent", chat_id=chat_id)
-        return True, f"File split and uploaded successfully ({total_parts} parts)"
-    except Exception as e:
-        return False, str(e)
-    finally:
-        try:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-        except Exception:
-            pass
-
 def send_file_to_telegram_sync_bridge(token: str, chat_id: int, file_path: str, auto_split: bool = True, progress_callback=None) -> tuple[bool, str]:
-    if not os.path.exists(file_path):
-        return False, "File not found."
-
-    file_size = os.path.getsize(file_path)
-    if file_size > 200 * 1024 * 1024:
-        return False, f"File exceeds maximum allowed size of 200 MB ({file_size/(1024*1024):.1f} MB)."
-
     bot_entry = ACTIVE_BOT_REGISTRY.get(token)
-    if bot_entry and bot_entry.get("adapter"):
-        adapter = bot_entry["adapter"]
-        try:
-            ok = adapter.send_document(chat_id, file_path, caption=f"📁 {os.path.basename(file_path)}")
-            if ok:
-                record_transfer(os.path.basename(file_path), file_path, file_size, direction="sent", chat_id=chat_id)
-                return True, "File delivered successfully via MTProto TDLib."
-            else:
-                return False, "Failed to deliver file via MTProto TDLib."
-        except Exception as e:
-            return False, f"MTProto file delivery error: {e}"
+    if not bot_entry or not bot_entry.get("app") or not bot_entry.get("loop"):
+        return False, "Telegram bot is currently offline for this account."
 
-    if bot_entry and bot_entry.get("app") and bot_entry.get("loop"):
-        app_inst = bot_entry["app"]
-        bot_loop = bot_entry["loop"]
-        if bot_loop and not bot_loop.is_closed():
-            try:
-                fut = asyncio.run_coroutine_threadsafe(
-                    send_large_file_split_telegram(app_inst.bot, chat_id, file_path, auto_split=auto_split, progress_callback=progress_callback),
-                    bot_loop
-                )
-                return fut.result(timeout=8)
-            except Exception:
-                pass  # Fall through to direct HTTP upload fallback
+    app_inst = bot_entry["app"]
+    bot_loop = bot_entry["loop"]
+    if not bot_loop or bot_loop.is_closed():
+        return False, "Bot event loop is stopped."
 
-    # Direct high-resilience upload fallback via get_telegram_session()
-    return send_file_direct_requests(token, chat_id, file_path, auto_split=auto_split, progress_callback=progress_callback)
+    fut = asyncio.run_coroutine_threadsafe(
+        send_large_file_split_telegram(app_inst.bot, chat_id, file_path, auto_split=auto_split, progress_callback=progress_callback),
+        bot_loop
+    )
+    return fut.result(timeout=1200)
 
 def send_text_to_telegram_sync_bridge(token: str, chat_id: int, text: str) -> tuple[bool, str]:
-    base_url = get_active_telegram_base_url()
     bot_entry = ACTIVE_BOT_REGISTRY.get(token)
-
-    if bot_entry and bot_entry.get("adapter"):
-        adapter = bot_entry["adapter"]
+    if not bot_entry or not bot_entry.get("app") or not bot_entry.get("loop"):
         try:
-            ok = adapter.send_message(chat_id, f"💻 **[Message from PC]:**\n{text}")
-            if ok:
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            resp = requests.post(url, json={"chat_id": chat_id, "text": f"💻 [PC Message]:\n{text}"}, timeout=10)
+            if resp.status_code == 200:
                 record_text_message(text, direction="sent", sender_name="PC User", chat_id=chat_id)
-                return True, "Message delivered successfully via MTProto TDLib."
+                return True, "Message sent successfully."
             else:
-                return False, "Failed to deliver message via MTProto TDLib."
+                return False, f"Telegram API error ({resp.status_code}): {resp.text}"
         except Exception as e:
-            return False, f"MTProto text delivery error: {e}"
+            return False, f"Error: {e}"
 
-    # 1. Attempt delivery via active bot event loop
-    if bot_entry and bot_entry.get("app") and bot_entry.get("loop"):
-        app_inst = bot_entry["app"]
-        bot_loop = bot_entry["loop"]
-        if bot_loop and not bot_loop.is_closed():
-            async def _send_msg():
-                await app_inst.bot.send_message(chat_id=chat_id, text=f"💻 **[Message from PC]:**\n{text}", parse_mode="Markdown")
-                return True, "Message delivered successfully."
+    app_inst = bot_entry["app"]
+    bot_loop = bot_entry["loop"]
+    if not bot_loop or bot_loop.is_closed():
+        return False, "Bot event loop is stopped."
 
-            try:
-                fut = asyncio.run_coroutine_threadsafe(_send_msg(), bot_loop)
-                ok, res = fut.result(timeout=5)
-                if ok:
-                    record_text_message(text, direction="sent", sender_name="PC User", chat_id=chat_id)
-                    return True, res
-            except Exception:
-                pass  # Fall back to direct proxy session POST below
+    async def _send_msg():
+        await app_inst.bot.send_message(chat_id=chat_id, text=f"💻 **[Message from PC]:**\n{text}", parse_mode="Markdown")
+        return True, "Message delivered successfully."
 
-    # 2. Direct HTTP POST via Configured Proxy Transport Layer
     try:
-        sess = get_telegram_session()
-        url = f"{base_url}/bot{token}/sendMessage"
-        resp = sess.post(
-            url,
-            json={"chat_id": chat_id, "text": f"💻 [PC Message]:\n{text}"},
-            timeout=(4.0, 10.0)
-        )
-        if resp.status_code == 200:
+        fut = asyncio.run_coroutine_threadsafe(_send_msg(), bot_loop)
+        ok, res = fut.result(timeout=15)
+        if ok:
             record_text_message(text, direction="sent", sender_name="PC User", chat_id=chat_id)
-            return True, "Message delivered successfully."
-        else:
-            return False, f"Telegram API error ({resp.status_code}): {resp.text}"
+        return ok, res
     except Exception as e:
-        err_msg = str(e)
-        if not err_msg or "timed out" in err_msg.lower():
-            err_msg = (
-                "Connection timed out (Telegram API unreachable).\n\n"
-                "💡 If Telegram is blocked by your ISP:\n"
-                "1. Open '🛡️ Proxy' at the top of PC Remote Pro.\n"
-                "2. Choose SOCKS5 or HTTP or Reverse Proxy.\n"
-                "3. Enable proxy to route all messages securely."
-            )
-        return False, err_msg
+        return False, str(e)
 
 PATH_STORE = {}
 PATH_TO_ID = {}
@@ -1372,362 +1148,17 @@ def xor_crypt(data: bytes, key: bytes) -> bytes:
     key_len = len(key)
     return bytes([b ^ key[i % key_len] for i, b in enumerate(data)])
 
-PROXY_SETTINGS = {
-    "server": "",
-    "port": "",
-    "secret": "",
-    "proto": "SOCKS5",
-    "reverse_url": "",
-    "enabled": False
-}
-
-def get_active_proxy_url() -> str | None:
-    """Returns canonical proxy URL (e.g. socks5://host:port or http://host:port) if enabled."""
-    global PROXY_SETTINGS
-    if not PROXY_SETTINGS.get("enabled"):
-        return None
-    proto = str(PROXY_SETTINGS.get("proto", "SOCKS5")).upper()
-    server = str(PROXY_SETTINGS.get("server", "")).strip()
-    port = str(PROXY_SETTINGS.get("port", "")).strip()
-    secret = str(PROXY_SETTINGS.get("secret", "")).strip()
-
-    if proto in ("SOCKS5", "HTTP") and server and port:
-        scheme = "socks5" if proto == "SOCKS5" else "http"
-        if secret and ":" in secret:
-            return f"{scheme}://{secret}@{server}:{port}"
-        elif secret:
-            return f"{scheme}://user:{secret}@{server}:{port}"
-        else:
-            return f"{scheme}://{server}:{port}"
-    return None
-
-def get_active_telegram_base_url() -> str:
-    """Returns active Telegram API endpoint root (default https://api.telegram.org or custom mirror)."""
-    global PROXY_SETTINGS
-    if PROXY_SETTINGS.get("enabled"):
-        proto = str(PROXY_SETTINGS.get("proto", "")).upper()
-        if proto == "REVERSE":
-            rev = str(PROXY_SETTINGS.get("reverse_url", "")).strip().rstrip("/")
-            if rev:
-                if not rev.startswith("http://") and not rev.startswith("https://"):
-                    rev = "https://" + rev
-                return rev
-    return "https://api.telegram.org"
-
-def get_telegram_session() -> requests.Session:
-    """Returns a requests Session configured with the active proxy transport layer."""
-    sess = requests.Session()
-    sess.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PCRemotePro/4.2"
-    })
-    proxy_url = get_active_proxy_url()
-    if proxy_url:
-        sess.proxies = {
-            "http": proxy_url,
-            "https": proxy_url
-        }
-    return sess
-
-def apply_global_proxy_layer():
-    """Applies system environment variables and default url openers for proxy tunneling."""
-    global PROXY_SETTINGS
-    proxy_url = get_active_proxy_url()
-    if proxy_url:
-        os.environ["HTTP_PROXY"] = proxy_url
-        os.environ["HTTPS_PROXY"] = proxy_url
-        os.environ["ALL_PROXY"] = proxy_url
-        try:
-            proxy_handler = urllib.request.ProxyHandler({
-                "http": proxy_url,
-                "https": proxy_url
-            })
-            opener = urllib.request.build_opener(proxy_handler)
-            urllib.request.install_opener(opener)
-        except Exception:
-            pass
-    else:
-        for var in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]:
-            if var in os.environ:
-                os.environ.pop(var, None)
-        try:
-            urllib.request.install_opener(urllib.request.build_opener())
-        except Exception:
-            pass
-
-def detect_local_proxies() -> list[dict]:
-    """Scans localhost for running proxy clients (V2Ray, Clash, Shadowsocks, Psiphon, Tor, etc.)."""
-    probes = [
-        (10808, "SOCKS5", "V2Ray / Xray SOCKS5"),
-        (10809, "HTTP", "V2Ray / Xray HTTP"),
-        (7890, "SOCKS5", "Clash / Mihomo SOCKS5"),
-        (7891, "HTTP", "Clash HTTP"),
-        (1080, "SOCKS5", "Shadowsocks SOCKS5"),
-        (2080, "SOCKS5", "Psiphon SOCKS5"),
-        (8080, "HTTP", "Local HTTP Proxy"),
-        (9050, "SOCKS5", "Tor SOCKS5"),
-        (8888, "HTTP", "Fiddler / Charles HTTP"),
-    ]
-    detected = []
-    for port, proto, name in probes:
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.2)
-            s.connect(("127.0.0.1", port))
-            s.close()
-            detected.append({"host": "127.0.0.1", "port": str(port), "proto": proto, "name": name})
-        except Exception:
-            pass
-    return detected
-
-def test_proxy_ping(host: str, port: int, timeout: float = 3.5) -> tuple[bool, float, str]:
-    """Tests TCP socket reachability to MTProto proxy host and port, returning (success, latency_ms, error_msg)."""
-    start = time.time()
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect((host.strip(), int(port)))
-        latency = (time.time() - start) * 1000.0
-        sock.close()
-        return True, round(latency, 1), ""
-    except Exception as e:
-        return False, 0.0, str(e)
-
-def parse_telegram_proxy_link(url_str: str) -> tuple[str, str, str, str]:
-    """Parses proxy link or string into (proto, server, port, secret)."""
-    from urllib.parse import urlparse, parse_qs
-    url_str = url_str.strip()
-    if url_str.startswith("socks5://"):
-        parsed = urlparse(url_str)
-        return "SOCKS5", parsed.hostname or "", str(parsed.port or ""), parsed.password or ""
-    elif url_str.startswith("http://"):
-        parsed = urlparse(url_str)
-        return "HTTP", parsed.hostname or "", str(parsed.port or ""), parsed.password or ""
-    elif url_str.startswith("tg://proxy?") or url_str.startswith("https://t.me/proxy?"):
-        if url_str.startswith("tg://proxy?"):
-            url_str = url_str.replace("tg://proxy?", "https://t.me/proxy?")
-        parsed = urlparse(url_str)
-        qs = parse_qs(parsed.query)
-        server = qs.get("server", [""])[0]
-        port = qs.get("port", [""])[0]
-        secret = qs.get("secret", [""])[0]
-        return "MTPROTO", server, port, secret
-    elif url_str.startswith("https://") and ("workers.dev" in url_str or "proxy" in url_str or "mirror" in url_str):
-        return "REVERSE", "", "", url_str
-    return "SOCKS5", "", "", ""
-
-def open_telegram_proxy(server: str, port: str, secret: str = "", proto: str = "MTPROTO"):
-    """Invokes Telegram Desktop or browser with the proxy configuration."""
-    server = server.strip()
-    port = port.strip()
-    secret = secret.strip()
-    proto = str(proto).upper()
-    if proto == "SOCKS5":
-        tg_uri = f"tg://socks?server={server}&port={port}"
-        https_url = f"https://t.me/socks?server={server}&port={port}"
-    else:
-        tg_uri = f"tg://proxy?server={server}&port={port}&secret={secret}"
-        https_url = f"https://t.me/proxy?server={server}&port={port}&secret={secret}"
-    try:
-        os.startfile(tg_uri)
-    except Exception:
-        try:
-            webbrowser.open(tg_uri)
-        except Exception:
-            webbrowser.open(https_url)
-
-def fetch_live_socks5_proxies(limit: int = 30) -> list[dict]:
-    """
-    Fetches fresh SOCKS5 proxies from top GitHub lists and verifies them
-    concurrently against Telegram Bot API. Returns verified working proxies sorted by ping.
-    """
-    sources = [
-        "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt",
-        "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
-        "https://raw.githubusercontent.com/prxchk/proxy-list/main/socks5.txt",
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"
-    ]
-    raw_list = []
-    seen = set()
-    for s in sources:
-        try:
-            r = requests.get(s, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PCRemotePro/4.2"}, timeout=3.5)
-            for line in r.text.splitlines():
-                line = line.strip()
-                if line and ":" in line and not line.startswith("#"):
-                    if line not in seen:
-                        seen.add(line)
-                        raw_list.append(line)
-            if len(raw_list) >= 120:
-                break
-        except Exception:
-            continue
-
-    # Known high-reliability Telegram SOCKS5 proxies as priority seed
-    known_seeds = ["49.13.22.249:10805", "147.45.79.130:1080", "176.65.132.138:1080", "107.174.30.93:1080"]
-    for k in reversed(known_seeds):
-        if k in seen:
-            raw_list.remove(k)
-        raw_list.insert(0, k)
-
-    results = []
-    def _test_socks5(px_str):
-        parts = px_str.split(":")
-        srv = parts[0].strip()
-        prt = parts[1].strip()
-        t0 = time.time()
-        try:
-            r = requests.get(
-                "https://api.telegram.org",
-                proxies={"https": f"socks5://{srv}:{prt}"},
-                timeout=(2.0, 3.0)
-            )
-            lat = round((time.time() - t0) * 1000, 1)
-            if r.status_code in (200, 302, 404):
-                return {
-                    "server": srv,
-                    "port": prt,
-                    "proto": "SOCKS5",
-                    "secret": "",
-                    "link": f"tg://socks?server={srv}&port={prt}",
-                    "ping": lat,
-                    "online": True
-                }
-        except Exception:
-            pass
-        return None
-
-    from concurrent.futures import ThreadPoolExecutor
-    candidates = raw_list[:50]
-    with ThreadPoolExecutor(max_workers=25) as pool:
-        for item in pool.map(_test_socks5, candidates):
-            if item:
-                results.append(item)
-                if len(results) >= limit:
-                    break
-
-    results.sort(key=lambda x: x["ping"])
-    return results
-
-def fetch_solispirit_proxies(limit: int = 40) -> list[dict]:
-    """
-    Fetches fresh, high-speed MTProto proxies directly from SoliSpirit/mtproto repository:
-    https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt
-    Parses proxies, conducts concurrent TCP reachability/ping tests,
-    and returns a sorted list of live working proxies.
-    """
-    urls = [
-        "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt",
-        "https://raw.githubusercontent.com/SoliSpirit/mtproto/main/all_proxies.txt"
-    ]
-    raw_lines = []
-    for u in urls:
-        try:
-            req = urllib.request.Request(
-                u,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PCRemotePro/4.2"}
-            )
-            with urllib.request.urlopen(req, timeout=6) as resp:
-                content = resp.read().decode("utf-8", errors="ignore")
-                for line in content.splitlines():
-                    line = line.strip()
-                    if ("tg://proxy?" in line or "t.me/proxy?" in line) and "server=" in line and "port=" in line:
-                        raw_lines.append(line)
-            if raw_lines:
-                break
-        except Exception:
-            continue
-
-    if not raw_lines:
-        return []
-
-    from urllib.parse import parse_qs
-    parsed = []
-    seen = set()
-    for line in raw_lines:
-        try:
-            q_part = line.split("?", 1)[1] if "?" in line else ""
-            qs = parse_qs(q_part)
-            server = qs.get("server", [""])[0].strip().rstrip(".")
-            port = qs.get("port", [""])[0].strip()
-            secret = qs.get("secret", [""])[0].strip()
-            if server and port and secret:
-                key = f"{server}:{port}"
-                if key not in seen:
-                    seen.add(key)
-                    parsed.append({
-                        "server": server,
-                        "port": port,
-                        "secret": secret,
-                        "link": f"tg://proxy?server={server}&port={port}&secret={secret}",
-                        "ping": 9999.0,
-                        "online": False
-                    })
-        except Exception:
-            continue
-
-    candidates = parsed[:limit]
-    from concurrent.futures import ThreadPoolExecutor
-
-    def _ping(item):
-        try:
-            ok, lat, _ = test_proxy_ping(item["server"], int(item["port"]), timeout=2.2)
-            item["online"] = ok
-            item["ping"] = lat if ok else 9999.0
-        except Exception:
-            item["online"] = False
-            item["ping"] = 9999.0
-
-    with ThreadPoolExecutor(max_workers=14) as pool:
-        list(pool.map(_ping, candidates))
-
-    candidates.sort(key=lambda x: (0 if x["online"] else 1, x["ping"]))
-    return candidates
-
-def save_config(accounts_list, autostart=True, security_guard=None, download_folder=None, proxy=None, telegram_connection=None):
-    global SECURITY_GUARD_SETTINGS, DOWNLOADS_FOLDER, PROXY_SETTINGS, TELEGRAM_CONNECTION_SETTINGS
+def save_config(accounts_list, autostart=True, security_guard=None, download_folder=None):
+    global SECURITY_GUARD_SETTINGS, DOWNLOADS_FOLDER
     if security_guard is not None:
         SECURITY_GUARD_SETTINGS = security_guard
     if download_folder is not None:
         DOWNLOADS_FOLDER = download_folder
-    if proxy is not None:
-        PROXY_SETTINGS = proxy
-    if telegram_connection is not None:
-        TELEGRAM_CONNECTION_SETTINGS = telegram_connection
-    apply_global_proxy_layer()
-
-    # DPAPI Protect sensitive credentials for disk storage
-    accounts_to_save = []
-    for acc in accounts_list:
-        acc_copy = dict(acc)
-        tok = acc_copy.get("token", "")
-        if tok and not str(tok).startswith("DPAPI:"):
-            try:
-                acc_copy["token"] = encrypt_credential(tok)
-            except Exception:
-                pass
-        ah = acc_copy.get("api_hash", "")
-        if ah and not str(ah).startswith("DPAPI:"):
-            try:
-                acc_copy["api_hash"] = encrypt_credential(ah)
-            except Exception:
-                pass
-        accounts_to_save.append(acc_copy)
-
-    tg_conn_save = dict(TELEGRAM_CONNECTION_SETTINGS)
-    ah = tg_conn_save.get("api_hash", "")
-    if ah and not str(ah).startswith("DPAPI:"):
-        try:
-            tg_conn_save["api_hash"] = encrypt_credential(ah)
-        except Exception:
-            pass
-
     data = {
-        "accounts": accounts_to_save,
+        "accounts": accounts_list,
         "autostart": autostart,
         "security_guard": SECURITY_GUARD_SETTINGS,
         "download_folder": DOWNLOADS_FOLDER,
-        "proxy": PROXY_SETTINGS,
-        "telegram_connection": tg_conn_save,
         "saved_at": time.time(),
         "version": APP_VERSION
     }
@@ -1768,7 +1199,7 @@ def save_config(accounts_list, autostart=True, security_guard=None, download_fol
         pass
 
 def load_config():
-    global SECURITY_GUARD_SETTINGS, PROXY_SETTINGS, TELEGRAM_CONNECTION_SETTINGS
+    global SECURITY_GUARD_SETTINGS
     targets = [CONFIG_JSON_PATH, CONFIG_BACKUP_PATH, LOCAL_BACKUP_PATH]
     for target in targets:
         if os.path.exists(target):
@@ -1782,42 +1213,6 @@ def load_config():
                             SECURITY_GUARD_SETTINGS.update(data["security_guard"])
                         if "download_folder" in data and isinstance(data["download_folder"], str):
                             set_download_folder(data["download_folder"])
-                        if "proxy" in data and isinstance(data["proxy"], dict):
-                            PROXY_SETTINGS.update(data["proxy"])
-                        if "telegram_connection" in data and isinstance(data["telegram_connection"], dict):
-                            TELEGRAM_CONNECTION_SETTINGS.update(data["telegram_connection"])
-                            ah = TELEGRAM_CONNECTION_SETTINGS.get("api_hash", "")
-                            if ah:
-                                try:
-                                    TELEGRAM_CONNECTION_SETTINGS["api_hash"] = decrypt_credential(ah)
-                                except Exception:
-                                    pass
-
-                        if str(TELEGRAM_CONNECTION_SETTINGS.get("api_id", "")).strip() in ("94575", "0", ""):
-                            TELEGRAM_CONNECTION_SETTINGS["api_id"] = "2040"
-                        if not TELEGRAM_CONNECTION_SETTINGS.get("api_hash") or TELEGRAM_CONNECTION_SETTINGS.get("api_hash") == "a3406de8d171714214e1e32a2f23e239":
-                            TELEGRAM_CONNECTION_SETTINGS["api_hash"] = "b18441a1ff607e10a989891a5462e627"
-
-                        # Decrypt in-memory accounts list
-                        for acc in data.get("accounts", []):
-                            tok = acc.get("token", "")
-                            if tok:
-                                try:
-                                    acc["token"] = decrypt_credential(tok)
-                                except Exception:
-                                    pass
-                            ah = acc.get("api_hash", "")
-                            if ah:
-                                try:
-                                    acc["api_hash"] = decrypt_credential(ah)
-                                except Exception:
-                                    pass
-                            if str(acc.get("api_id", "")).strip() in ("94575", "0", ""):
-                                acc["api_id"] = "2040"
-                            if not acc.get("api_hash") or acc.get("api_hash") == "a3406de8d171714214e1e32a2f23e239":
-                                acc["api_hash"] = "b18441a1ff607e10a989891a5462e627"
-
-                        apply_global_proxy_layer()
                         return data
             except Exception:
                 continue
@@ -1832,12 +1227,10 @@ def load_config():
                 if "security_guard" in data and isinstance(data["security_guard"], dict):
                     SECURITY_GUARD_SETTINGS.update(data["security_guard"])
                 save_config(data.get("accounts", []), autostart=data.get("autostart", True))
-                apply_global_proxy_layer()
                 return data
         except Exception:
             pass
 
-    apply_global_proxy_layer()
     return {"accounts": [], "autostart": True}
 
 # ----------------- Ultra-HD Multi-Monitor Screenshot Capture -----------------
@@ -2238,22 +1631,9 @@ def ensure_wifi_connected() -> bool:
 def broadcast_security_alert(webcam_path: str = None, screen_path: str = None, caption_text: str = ""):
     """Broadcasts immediate security alert (webcam face photo + screenshot) to all registered user accounts."""
     for token, bot_entry in list(ACTIVE_BOT_REGISTRY.items()):
-        adapter = bot_entry.get("adapter")
-        user_map = bot_entry.get("user_map", {})
-        if adapter:
-            for cid in user_map.keys():
-                try:
-                    if webcam_path and os.path.exists(webcam_path):
-                        adapter.send_photo(cid, webcam_path, caption=caption_text)
-                    else:
-                        adapter.send_message(cid, caption_text)
-                    if screen_path and os.path.exists(screen_path):
-                        adapter.send_photo(cid, screen_path, caption="📸 Security Alert PC Screenshot")
-                except Exception:
-                    pass
-
         app_inst = bot_entry.get("app")
         bot_loop = bot_entry.get("loop")
+        user_map = bot_entry.get("user_map", {})
         if app_inst and bot_loop and not bot_loop.is_closed():
             for chat_id in user_map.keys():
                 async def _send(cid=chat_id, ai=app_inst, wp=webcam_path, sp=screen_path, cap=caption_text):
@@ -3107,14 +2487,15 @@ class SmartNetworkWatchdog:
         self.consecutive_fails = 0
 
     def check_internet(self) -> bool:
-        # Fast DNS socket check (timeout 0.6s) - does not block or depend on censored web domains
+        # Fast multi-endpoint check using port 443
         endpoints = [
-            ("1.1.1.1", 53),
-            ("8.8.8.8", 53)
+            ("api.telegram.org", 443),
+            ("1.1.1.1", 443),
+            ("8.8.8.8", 443)
         ]
         for host, port in endpoints:
             try:
-                s = socket.create_connection((host, port), timeout=0.6)
+                s = socket.create_connection((host, port), timeout=3)
                 s.close()
                 return True
             except OSError:
@@ -3394,425 +2775,87 @@ def get_menu_keyboard(menu_type="main", lang="en"):
         return ReplyKeyboardMarkup([[B("btn_screen", lang), B("btn_back", lang)]], **common_options)
 
 # ----------------- Real-Time Diagnostic Test Function -----------------
-def test_telegram_connection(token: str, chat_id_str: str, use_mtproto: bool = False, api_id: int = 2040, api_hash: str = "b18441a1ff607e10a989891a5462e627") -> tuple[bool, str]:
+def test_telegram_connection(token: str, chat_id_str: str) -> tuple[bool, str]:
     token = token.strip()
-    chat_id_str = str(chat_id_str).strip()
+    chat_id_str = chat_id_str.strip()
 
     if not token:
-        return False, "❌ Bot token is empty! Please enter your token from @BotFather."
+        return False, "❌ Bot token field is empty! Please paste your token from @BotFather."
 
     try:
-        chat_id = int(chat_id_str) if chat_id_str else None
-    except ValueError:
-        return False, "❌ Chat ID must contain digits only."
+        url_getme = f"https://api.telegram.org/bot{token}/getMe"
+        req = urllib.request.Request(url_getme, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode())
+            if not data.get("ok"):
+                return False, "❌ Bot token is invalid or revoked by BotFather!"
+            bot_username = data.get("result", {}).get("username", "Bot")
+    except urllib.error.HTTPError as e:
+        if e.code in [401, 404]:
+            return False, "❌ Bot token is unauthorized! Verify the token from @BotFather."
+        return False, f"❌ Telegram HTTP error ({e.code}): {e.reason}"
+    except Exception as e:
+        return False, f"❌ Failed to reach Telegram API. Verify internet connection: {e}"
 
-    try:
-        aid = int(api_id)
-        if aid in (0, 94575):
-            aid = 2040
-    except Exception:
-        aid = 2040
-    api_id = aid
-
-    ahash = str(api_hash or "").strip()
-    if not ahash or ahash == "a3406de8d171714214e1e32a2f23e239":
-        ahash = "b18441a1ff607e10a989891a5462e627"
-    api_hash = ahash
-
-    if use_mtproto:
-        # Test using TDLib MTProto Connection
+    chat_id = None
+    if chat_id_str:
         try:
-            best_px = GLOBAL_PROXY_MANAGER.get_current_or_best()
-            if not best_px:
-                return False, "❌ No reachable MTProto proxy servers found. Please check internet connection."
+            chat_id = int(chat_id_str)
+        except ValueError:
+            return False, "❌ Invalid Chat ID! Must consist of digits only (obtain from @userinfobot)."
 
-            srv = best_px.get("server")
-            prt = best_px.get("port")
-            ping = best_px.get("ping", 0)
-
-            # Check if bot already has an active adapter
-            entry = ACTIVE_BOT_REGISTRY.get(token)
-            if entry and entry.get("adapter"):
-                ad = entry["adapter"]
-                if chat_id:
-                    ad.send_message(chat_id, f"""⚡ MTProto Connection Test from PC Remote Pro:
-Host: {platform.node()}
-Proxy: {srv}:{prt} ({ping:.0f} ms)
-Status: Ready ✅""")
-                return True, f"""✅ Bot MTProto Connection Healthy!
-Proxy: {srv}:{prt}
-Latency: {ping:.0f} ms
-TDLib State: {ad.connection_state.upper()}"""
-
-            # Otherwise test live auth via temporary TDLib client
-            test_db = os.path.join(DATA_DIR, f"tdlib_test_{int(time.time() * 1000)}")
-            client = TDLibClient()
-            auth_ok = threading.Event()
-            auth_err = []
-
-            def _ready():
-                auth_ok.set()
-
-            def _err(msg):
-                auth_err.append(msg)
-                auth_ok.set()
-
-            auth = TDLibBotAuth(
-                client=client,
-                api_id=api_id,
-                api_hash=api_hash,
-                bot_token=token,
-                database_dir=test_db,
-                initial_proxy=best_px,
-                on_ready=_ready,
-                on_error=_err
+    if chat_id:
+        try:
+            test_msg = (
+                f"🟢 **Connection Test Successful!**\n\n"
+                f"💻 Host PC: `{platform.node()}`\n"
+                f"👤 User: `{CURRENT_USER}`\n"
+                f"🤖 Bot: @{bot_username}\n\n"
+                f"Control keyboard registered below. Tap any button to interact with your PC:"
             )
+            send_data = json.dumps({
+                "chat_id": chat_id,
+                "text": test_msg,
+                "parse_mode": "Markdown",
+                "reply_markup": {
+                    "keyboard": [
+                        ["📂 Files & Storage", "🌐 Web & YouTube"],
+                        ["⚡ Power Controls", "📊 System Monitor"],
+                        ["🔋 Battery Status", "🎛 Audio & Media"],
+                        ["🛠️ Tools & Utility", "📸 Screen Capture"],
+                        ["📷 Webcam Snapshot", "🎙️ Voice Record (10s)"],
+                        ["🖥️ PC Hardware Specs", "📶 Wi-Fi & Network"],
+                        ["🏓 Ping & Latency", "⚡ Kill Process"],
+                        ["🌐 Language / اللغة", "🔙 Back to Main Menu"]
+                    ],
+                    "resize_keyboard": True,
+                    "is_persistent": True,
+                    "one_time_keyboard": False
+                }
+            }).encode('utf-8')
 
-            auth_ok.wait(timeout=14.0)
-            client.close()
-            try:
-                shutil.rmtree(test_db, ignore_errors=True)
-            except Exception:
-                pass
-
-            if auth.is_authorized.is_set():
-                return True, f"""✅ MTProto Authentication Verified Successfully!
-Connected to {srv}:{prt} (Ping: {ping:.0f} ms)
-Bot token authenticated via TDLib."""
-            elif auth_err:
-                return False, f"""❌ MTProto Authentication Error:
-{auth_err[0]}"""
-            else:
-                return False, f"""⚠️ MTProto connection timed out contacting {srv}:{prt}. Try switching proxy or checking internet."""
+            url_send = f"https://api.telegram.org/bot{token}/sendMessage"
+            req_send = urllib.request.Request(
+                url_send,
+                data=send_data,
+                headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
+            )
+            with urllib.request.urlopen(req_send, timeout=8) as resp:
+                data_send = json.loads(resp.read().decode())
+                if data_send.get("ok"):
+                    return True, f"✅ Connection verified 100%!\nLinked with @{bot_username} and test message delivered to your Telegram."
+        except urllib.error.HTTPError as e:
+            if e.code in [400, 403]:
+                return True, (
+                    f"✅ Bot Token & Connection Verified Successfully (@{bot_username})!\n\n"
+                    f"💡 Application is fully connected to Telegram servers and active in the background.\n"
+                    f"📌 Note: To start controlling your PC from your phone, open Telegram, search for @{bot_username}, and tap START."
+                )
+            return False, f"❌ Telegram HTTP error ({e.code}): {e.reason}"
         except Exception as e:
-            return False, f"❌ TDLib MTProto Test Error: {e}"
+            return True, f"✅ Token is valid and linked with @{bot_username}.\nApplication is active in the background."
 
-    # Normal Direct Mode via Telegram Bot API
-    sess = get_telegram_session()
-    base_url = get_active_telegram_base_url()
-    try:
-        url_getme = f"{base_url}/bot{token}/getMe"
-        resp = sess.get(url_getme, timeout=8)
-        data = resp.json()
-        if not data.get("ok"):
-            return False, "❌ Bot token is invalid or revoked by BotFather!"
-        bot_username = data.get("result", {}).get("username", "Bot")
-        if chat_id:
-            try:
-                sess.post(f"{base_url}/bot{token}/sendMessage", json={
-                    "chat_id": chat_id,
-                    "text": f"""⚡ Bot Connection Verified!
-Host: {platform.node()}
-Username: @{bot_username}
-Direct Mode: Active ✅"""
-                }, timeout=6)
-            except Exception:
-                pass
-        return True, f"""✅ Bot (@{bot_username}) verified successfully via Direct HTTPS!
-Application is ready for remote control."""
-    except Exception as e:
-        err_s = str(e)
-        if "timed out" in err_s.lower() or "max retries exceeded" in err_s.lower():
-            return False, """⚠️ Direct Connection to api.telegram.org timed out (Region Blocked).
-
-💡 Fix: Under 'Telegram MTProto Connection' below, enable MTProto mode to bypass the block via TDLib!"""
-        return False, f"❌ Connection Error: {e}"
-
-# ----------------- Native TDLib MTProto Bot Engine -----------------
-def start_tdlib_bot_thread(token: str, user_dict_ref: dict, api_id: int = 2040, api_hash: str = "b18441a1ff607e10a989891a5462e627"):
-    """
-    Runs a Telegram Bot instance over official TDLib (tdjson.dll) and MTProto proxy.
-    Bypasses ISP blocks on api.telegram.org (e.g. in Iraq and restricted regions).
-    """
-    token_clean = token.strip()
-    try:
-        aid = int(api_id)
-        if aid in (0, 94575):
-            aid = 2040
-    except Exception:
-        aid = 2040
-    api_id = aid
-
-    ahash = str(api_hash or "").strip()
-    if not ahash or ahash == "a3406de8d171714214e1e32a2f23e239":
-        ahash = "b18441a1ff607e10a989891a5462e627"
-    api_hash = ahash
-    db_hash = hashlib.sha256(token_clean.encode()).hexdigest()[:12]
-    tdlib_db_dir = os.path.join(DATA_DIR, f"tdlib_db_{db_hash}")
-    os.makedirs(tdlib_db_dir, exist_ok=True)
-
-    try:
-        client = TDLibClient()
-    except Exception as e:
-        print(f"[TDLib Client Init Error]: {e}")
-        return
-
-    best_proxy = GLOBAL_PROXY_MANAGER.get_current_or_best()
-    ready_event = threading.Event()
-
-    def _on_ready():
-        ready_event.set()
-
-    def _on_error(err):
-        print(f"[TDLib Auth Error]: {err}")
-        ready_event.set()
-
-    auth = TDLibBotAuth(
-        client=client,
-        api_id=api_id,
-        api_hash=api_hash,
-        bot_token=token_clean,
-        database_dir=tdlib_db_dir,
-        initial_proxy=best_proxy,
-        app_version=APP_VERSION,
-        on_ready=_on_ready,
-        on_error=_on_error
-    )
-
-    adapter = TelegramBotAdapter(
-        client=client,
-        proxy_manager=GLOBAL_PROXY_MANAGER,
-        authorized_chat_ids=user_dict_ref,
-        command_executor=lambda msg, cid, ctype, cont: route_tdlib_command(adapter, msg, cid, ctype, cont),
-        callback_executor=lambda cb, cid, qid, upd: route_tdlib_callback(adapter, cb, cid, qid, upd)
-    )
-
-    entry = ACTIVE_BOT_REGISTRY.get(token)
-    if entry:
-        entry["adapter"] = adapter
-        entry["client"] = client
-        entry["auth"] = auth
-        entry["mode"] = "mtproto"
-
-    # Wait for TDLib authentication ready with proactive proxy failover
-    if not ready_event.wait(timeout=8.0):
-        print("[TDLib] Initial proxy taking long, triggering auto-failover...")
-        for _ in range(3):
-            next_px = GLOBAL_PROXY_MANAGER.trigger_failover()
-            if next_px:
-                auth.apply_mtproto_proxy(next_px["server"], next_px["port"], next_px["secret"])
-                if ready_event.wait(timeout=6.0):
-                    break
-
-    if auth.is_authorized.is_set():
-        adapter.connection_state = "ready"
-        hostname = platform.node()
-        now_time = datetime.now().strftime("%Y-%m-%d %I:%M %p")
-        srv_info = f"{best_proxy['server']}:{best_proxy['port']}" if best_proxy else "MTProto"
-        for cid, info in list(user_dict_ref.items()):
-            uname = info.get("name", "User")
-            welcome_msg = f"""🟢 **PC Remote Pro - Online via MTProto (TDLib)!**\n\n💻 **Host:** `{hostname}`\n👤 **Account:** `{uname}` ({CURRENT_USER})\n🛡️ **MTProto Server:** `{srv_info}`\n⏰ **Time:** `{now_time}`\n\nCensorship bypass active. Send `/help` or `/menu` for remote commands."""
-            try:
-                adapter.send_message(cid, welcome_msg)
-            except Exception:
-                pass
-
-    while True:
-        entry = ACTIVE_BOT_REGISTRY.get(token)
-        if not entry or entry.get("stop_requested"):
-            break
-        time.sleep(1.0)
-
-    try:
-        client.close()
-    except Exception:
-        pass
-
-def route_tdlib_command(adapter: TelegramBotAdapter, text: str, chat_id: int, content_type: str, content: dict):
-    clean = (text or "").strip()
-    lowered = clean.lower()
-
-    if content_type in ("messageDocument", "messagePhoto", "messageVoiceNote", "messageAudio", "messageVideo"):
-        handle_tdlib_media_download(adapter, chat_id, content_type, content)
-        return
-
-    if not clean.startswith("/") and content_type == "messageText":
-        record_text_message(clean, direction="received", sender_name="Telegram User", chat_id=chat_id)
-        notify_text_received(clean, "Telegram User")
-        adapter.send_message(chat_id, f"""✅ **Message saved to PC Files Hub:**\n`{clean[:120]}`""")
-        return
-
-    parts = clean.split(None, 1)
-    cmd = parts[0].lower().split("@")[0]
-    arg = parts[1].strip() if len(parts) > 1 else ""
-
-    if cmd in ("/start", "/menu", "/help"):
-        help_msg = f"""💻 **PC Remote Pro - Remote Control Menu ({platform.node()}):**\n\nChoose a command below:\n• `/screen` - Ultra-HD Screenshot (Photo + Lossless Document)\n• `/cam` - Webcam snapshot\n• `/mic [sec]` - Record microphone clip\n• `/specs` - PC Specifications & RAM/CPU\n• `/wifi` - Wi-Fi passwords & IP\n• `/status` - TDLib & MTProto Proxy health\n• `/proxy` - Active MTProto proxy server\n• `/reconnect` - Failover to next MTProto proxy\n• `/cmd [command]` - Run CMD shell command\n• `/py [code]` - Run Python code\n• `/msg [text]` - Show desktop alert\n• `/say [text]` - Text-to-speech on speakers\n• `/apps` - List top running apps\n• `/kill [name]` - End task\n• `/yt [search]` - Play YouTube video\n• `/guard` - Toggle intruder security guard\n• `/power [sleep|restart|shutdown|lock]` - Power options"""
-        adapter.send_message(chat_id, help_msg)
-
-    elif cmd == "/screen":
-        adapter.send_message(chat_id, "📸 Capturing Ultra-HD screen...")
-        try:
-            output_path, w, h = capture_screen_ultra_hd()
-            adapter.send_photo(chat_id, output_path, caption=f"📸 **Screen Capture ({w}x{h} px)**\nHost: `{platform.node()}`")
-            adapter.send_document(chat_id, output_path, caption="💎 **Uncompressed Lossless Document**")
-        except Exception as e:
-            adapter.send_message(chat_id, f"❌ Failed to capture screenshot: {e}")
-
-    elif cmd == "/cam":
-        adapter.send_message(chat_id, "📷 Taking webcam snapshot...")
-        ok, res = capture_webcam_photo()
-        if ok:
-            adapter.send_photo(chat_id, res, caption=f"📷 **Webcam Snapshot** - `{platform.node()}`")
-        else:
-            adapter.send_message(chat_id, f"❌ Webcam error: {res}")
-
-    elif cmd == "/mic":
-        dur = 10
-        if arg.isdigit():
-            dur = max(3, min(60, int(arg)))
-        adapter.send_message(chat_id, f"🎙️ Recording {dur} seconds of audio...")
-        ok, res = record_microphone_clip(dur)
-        if ok:
-            adapter.send_voice(chat_id, res, caption=f"🎙️ **Recorded Audio ({dur}s)**")
-        else:
-            adapter.send_message(chat_id, f"❌ Microphone error: {res}")
-
-    elif cmd == "/specs":
-        specs = get_system_specs_summary()
-        adapter.send_message(chat_id, specs)
-
-    elif cmd == "/wifi":
-        wifi = get_saved_wifi_passwords(search_query=arg or None, lang="en", show_all=True)
-        adapter.send_message(chat_id, wifi)
-
-    elif cmd == "/cmd":
-        if not arg:
-            adapter.send_message(chat_id, "ℹ️ Usage: `/cmd ipconfig` or `/cmd dir`")
-            return
-        adapter.send_message(chat_id, f"⚙️ Running CMD: `{arg}` ...")
-        try:
-            proc = subprocess.run(arg, shell=True, capture_output=True, text=True, timeout=15)
-            out = (proc.stdout or "") + ("\n[Error]: " + proc.stderr if proc.stderr else "")
-            out = out.strip() or "(Executed with no output)"
-            if len(out) > 3500:
-                out = out[:3500] + "\n... [Truncated]"
-            adapter.send_message(chat_id, f"""💻 **CMD Output:**\n```\n{out}\n```""")
-        except Exception as e:
-            adapter.send_message(chat_id, f"❌ Command error: {e}")
-
-    elif cmd == "/py":
-        if not arg:
-            adapter.send_message(chat_id, "ℹ️ Usage: `/py print(1+1)`")
-            return
-        adapter.send_message(chat_id, "🐍 Running Python code...")
-        try:
-            proc = subprocess.run([sys.executable, "-c", arg], capture_output=True, text=True, timeout=20)
-            out = (proc.stdout or "") + ("\n[Error]: " + proc.stderr if proc.stderr else "")
-            out = out.strip() or "(Executed with no output)"
-            if len(out) > 3500:
-                out = out[:3500] + "\n... [Truncated]"
-            adapter.send_message(chat_id, f"""🐍 **Python Output:**\n```\n{out}\n```""")
-        except Exception as e:
-            adapter.send_message(chat_id, f"❌ Python error: {e}")
-
-    elif cmd == "/msg":
-        if not arg:
-            adapter.send_message(chat_id, "ℹ️ Usage: `/msg Hello from phone!`")
-            return
-        show_screen_popup(arg)
-        adapter.send_message(chat_id, '📢 **Popup displayed on PC screen:**\n\"' + arg + '\"')
-
-    elif cmd == "/say":
-        if not arg:
-            adapter.send_message(chat_id, "ℹ️ Usage: `/say Welcome home`")
-            return
-        speak_text(arg)
-        adapter.send_message(chat_id, '🗣️ **Speaking text on PC speakers:**\n\"' + arg + '\"')
-
-    elif cmd == "/apps":
-        apps_txt = get_running_apps()
-        adapter.send_message(chat_id, apps_txt)
-
-    elif cmd == "/kill":
-        if not arg:
-            adapter.send_message(chat_id, "ℹ️ Usage: `/kill notepad.exe`")
-            return
-        res = terminate_process(arg)
-        adapter.send_message(chat_id, res)
-
-    elif cmd == "/yt":
-        if not arg:
-            adapter.send_message(chat_id, "ℹ️ Usage: `/yt lofi hip hop`")
-            return
-        search_youtube_videos(arg)
-        adapter.send_message(chat_id, f"▶️ Opened YouTube on PC for: `{arg}`")
-
-    elif cmd == "/guard":
-        global SECURITY_GUARD_SETTINGS
-        curr = SECURITY_GUARD_SETTINGS.get("enabled", False)
-        SECURITY_GUARD_SETTINGS["enabled"] = not curr
-        st = "🟢 Active (Armed)" if not curr else "🔴 Deactivated"
-        adapter.send_message(chat_id, f"🛡️ **Security Guard Mode:** {st}")
-
-    elif cmd == "/power":
-        sub = arg.lower()
-        if sub == "shutdown":
-            adapter.send_message(chat_id, "🔌 Shutting down PC in 5 seconds...")
-            subprocess.run("shutdown /s /t 5", shell=True)
-        elif sub == "restart":
-            adapter.send_message(chat_id, "🔄 Restarting PC in 5 seconds...")
-            subprocess.run("shutdown /r /t 5", shell=True)
-        elif sub == "lock":
-            adapter.send_message(chat_id, "🔒 Locking PC workstation...")
-            ctypes.windll.user32.LockWorkStation()
-        elif sub == "sleep":
-            adapter.send_message(chat_id, "💤 Putting PC to sleep...")
-            subprocess.run("rundll32.exe powrprof.dll,SetSuspendState 0,1,0", shell=True)
-        else:
-            adapter.send_message(chat_id, "ℹ️ Usage: `/power shutdown`, `/power restart`, `/power lock`, or `/power sleep`")
-
-def route_tdlib_callback(adapter: TelegramBotAdapter, cb_data: str, chat_id: int, query_id: str, update: dict):
-    pass
-
-def handle_tdlib_media_download(adapter: TelegramBotAdapter, chat_id: int, content_type: str, content: dict):
-    try:
-        file_obj = None
-        file_name = f"received_{int(time.time())}"
-        if content_type == "messageDocument":
-            doc = content.get("document", {})
-            file_name = doc.get("file_name", file_name)
-            file_obj = doc.get("document", {})
-        elif content_type == "messagePhoto":
-            sizes = content.get("photo", {}).get("sizes", [])
-            if sizes:
-                largest = max(sizes, key=lambda s: s.get("width", 0))
-                file_obj = largest.get("photo", {})
-                file_name = f"photo_{int(time.time())}.jpg"
-        elif content_type == "messageVoiceNote":
-            voice = content.get("voice_note", {})
-            file_obj = voice.get("voice", {})
-            file_name = f"voice_{int(time.time())}.ogg"
-        elif content_type in ("messageAudio", "messageVideo"):
-            media = content.get("audio") or content.get("video") or {}
-            file_name = media.get("file_name", f"media_{int(time.time())}")
-            file_obj = media.get("audio") or media.get("video") or {}
-
-        if not file_obj or not file_obj.get("id"):
-            return
-
-        file_id = file_obj.get("id")
-        dl_resp = adapter.client.send_request({
-            "@type": "downloadFile",
-            "file_id": file_id,
-            "priority": 1,
-            "offset": 0,
-            "limit": 0,
-            "synchronous": True
-        }, timeout=45.0)
-
-        local_path = dl_resp.get("local", {}).get("path")
-        if local_path and os.path.exists(local_path):
-            dest = os.path.join(get_download_folder(), file_name)
-            shutil.copy2(local_path, dest)
-            sz = os.path.getsize(dest)
-            record_transfer(file_name, dest, sz, direction="received", chat_id=chat_id)
-            notify_file_saved(file_name, dest)
-            adapter.send_message(chat_id, f"""✅ **File received and saved to PC:**\n📁 `{file_name}` ({sz/(1024*1024):.1f} MB)""")
-            if content_type == "messagePhoto":
-                set_image_to_clipboard(dest)
-    except Exception as e:
-        print(f"[TDLib Media Download Error]: {e}")
+    return True, f"✅ Bot (@{bot_username}) verified successfully!\nApplication is ready for remote control."
 
 # ----------------- Multi-Account Concurrent Bot Engine -----------------
 def start_bot_thread(token: str, user_dict_ref: dict):
@@ -5952,29 +4995,13 @@ def start_bot_thread(token: str, user_dict_ref: dict):
         if entry and entry.get("stop_requested"):
             break
 
-        # Check network connectivity before polling attempt
-        proxy_url = get_active_proxy_url()
-        base_url = get_active_telegram_base_url()
-        check_host = "api.telegram.org"
-        check_port = 443
-
-        if proxy_url:
-            from urllib.parse import urlparse
-            p_parsed = urlparse(proxy_url)
-            check_host = p_parsed.hostname or "127.0.0.1"
-            check_port = p_parsed.port or 10808
-        elif base_url != "https://api.telegram.org":
-            from urllib.parse import urlparse
-            p_parsed = urlparse(base_url)
-            check_host = p_parsed.hostname or "api.telegram.org"
-            check_port = p_parsed.port or (443 if p_parsed.scheme == "https" else 80)
-
+        # Check internet before polling attempt
         for _ in range(15):
             entry = ACTIVE_BOT_REGISTRY.get(token)
             if entry and entry.get("stop_requested"):
                 return
             try:
-                s = socket.create_connection((check_host, check_port), timeout=3)
+                s = socket.create_connection(("api.telegram.org", 443), timeout=3)
                 s.close()
                 break
             except OSError:
@@ -5988,7 +5015,6 @@ def start_bot_thread(token: str, user_dict_ref: dict):
 
         try:
             req = HTTPXRequest(
-                proxy=proxy_url if proxy_url else None,
                 connection_pool_size=16,
                 connect_timeout=30.0,
                 read_timeout=120.0,
@@ -5996,15 +5022,13 @@ def start_bot_thread(token: str, user_dict_ref: dict):
                 pool_timeout=30.0,
                 socket_options=[(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
             )
-            builder = (
+            app = (
                 Application.builder()
                 .token(token)
                 .request(req)
                 .post_init(post_init)
+                .build()
             )
-            if base_url != "https://api.telegram.org":
-                builder = builder.base_url(f"{base_url.rstrip('/')}/bot")
-            app = builder.build()
             register_all_handlers(app)
 
             if token in ACTIVE_BOT_REGISTRY:
@@ -6222,14 +5246,12 @@ class MasterMiniApp(ctk.CTk):
         self.frame_password_set = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
         self.frame_password_auth = ctk.CTkFrame(self.root_scroll, fg_color="transparent")
         self.frame_info_guide = ctk.CTkFrame(self.root_scroll, fg_color="transparent")      # Info & Instructions Guide
-        self.frame_proxy = ctk.CTkFrame(self.root_scroll, fg_color="transparent")           # MTProto Proxy Manager
 
         self.setup_dashboard_ui()
         self.setup_editor_ui()
         self.setup_transfer_hub_ui()
         self.setup_password_ui()
         self.setup_info_guide_ui()
-        self.setup_proxy_ui()
 
         # Compact Footer
         self.lbl_footer = ctk.CTkLabel(
@@ -6295,71 +5317,18 @@ class MasterMiniApp(ctk.CTk):
         )
         self.lbl_dash_subtitle.pack(anchor="w")
 
-        # ----------------- Telegram Connection Monitor Panel -----------------
-        self.frame_conn_monitor = ctk.CTkFrame(
-            self.frame_dashboard,
-            fg_color="#181818",
-            corner_radius=8,
-            border_width=1,
-            border_color="#2b2b2b"
-        )
-        self.frame_conn_monitor.pack(fill="x", padx=6, pady=(2, 4))
-
-        header_mon = ctk.CTkFrame(self.frame_conn_monitor, fg_color="transparent")
-        header_mon.pack(fill="x", padx=8, pady=(6, 2))
-
-        lbl_mon_title = ctk.CTkLabel(
-            header_mon,
-            text="📡 Telegram Connection Monitor",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color="#00bcd4"
-        )
-        lbl_mon_title.pack(side="left")
-
-        self.lbl_mon_badge = ctk.CTkLabel(
-            header_mon,
-            text="🟢 Standby",
+        self.btn_header_info = ctk.CTkButton(
+            self.header_dash,
+            text="ℹ️ INFO",
+            width=68,
+            height=26,
+            fg_color="#17a2b8",
+            hover_color="#138496",
+            text_color="#FFFFFF",
             font=ctk.CTkFont(size=10, weight="bold"),
-            text_color="#28a748"
+            command=self.show_info_guide
         )
-        self.lbl_mon_badge.pack(side="right")
-
-        mon_details = ctk.CTkFrame(self.frame_conn_monitor, fg_color="transparent")
-        mon_details.pack(fill="x", padx=8, pady=(0, 6))
-
-        row1 = ctk.CTkFrame(mon_details, fg_color="transparent")
-        row1.pack(fill="x", pady=1)
-        ctk.CTkLabel(row1, text="Mode:", font=ctk.CTkFont(size=9, weight="bold"), text_color="#888888", width=55, anchor="w").pack(side="left")
-        self.lbl_mon_mode = ctk.CTkLabel(row1, text="Direct Bot API (Normal)", font=ctk.CTkFont(size=9), text_color="#FFFFFF", anchor="w")
-        self.lbl_mon_mode.pack(side="left", fill="x", expand=True)
-
-        row2 = ctk.CTkFrame(mon_details, fg_color="transparent")
-        row2.pack(fill="x", pady=1)
-        ctk.CTkLabel(row2, text="Engine:", font=ctk.CTkFont(size=9, weight="bold"), text_color="#888888", width=55, anchor="w").pack(side="left")
-        self.lbl_mon_engine = ctk.CTkLabel(row2, text="python-telegram-bot (HTTPS)", font=ctk.CTkFont(size=9), text_color="#cccccc", anchor="w")
-        self.lbl_mon_engine.pack(side="left", fill="x", expand=True)
-
-        row3 = ctk.CTkFrame(mon_details, fg_color="transparent")
-        row3.pack(fill="x", pady=1)
-        ctk.CTkLabel(row3, text="Proxy / Ping:", font=ctk.CTkFont(size=9, weight="bold"), text_color="#888888", width=70, anchor="w").pack(side="left")
-        self.lbl_mon_server = ctk.CTkLabel(row3, text="None (Direct Connection)", font=ctk.CTkFont(size=9), text_color="#00bcd4", anchor="w")
-        self.lbl_mon_server.pack(side="left", fill="x", expand=True)
-        self.lbl_mon_latency = ctk.CTkLabel(row3, text="-- ms", font=ctk.CTkFont(size=9, weight="bold"), text_color="#28a748")
-        self.lbl_mon_latency.pack(side="right")
-
-        row4 = ctk.CTkFrame(mon_details, fg_color="transparent")
-        row4.pack(fill="x", pady=1)
-        ctk.CTkLabel(row4, text="Recv / Sent:", font=ctk.CTkFont(size=9, weight="bold"), text_color="#888888", width=70, anchor="w").pack(side="left")
-        self.lbl_mon_activity = ctk.CTkLabel(row4, text="Never / Never", font=ctk.CTkFont(size=9), text_color="#cccccc", anchor="w")
-        self.lbl_mon_activity.pack(side="left", fill="x", expand=True)
-
-        row5 = ctk.CTkFrame(mon_details, fg_color="transparent")
-        row5.pack(fill="x", pady=1)
-        ctk.CTkLabel(row5, text="Auto-Failover:", font=ctk.CTkFont(size=9, weight="bold"), text_color="#888888", width=75, anchor="w").pack(side="left")
-        self.lbl_mon_failover = ctk.CTkLabel(row5, text="Standby", font=ctk.CTkFont(size=9), text_color="#e0a800", anchor="w")
-        self.lbl_mon_failover.pack(side="left", fill="x", expand=True)
-
-        self.after(2000, self.update_connection_monitor_ui)
+        self.btn_header_info.pack(side="right", padx=(0, 2))
 
         self.scroll_accounts = ctk.CTkScrollableFrame(self.frame_dashboard, width=330, height=190)
         self.scroll_accounts.pack(padx=6, pady=4, fill="both", expand=True)
@@ -6626,7 +5595,6 @@ class MasterMiniApp(ctk.CTk):
         self.frame_password_set.pack_forget()
         self.frame_password_auth.pack_forget()
         self.frame_info_guide.pack_forget()
-        self.frame_proxy.pack_forget()
         self.refresh_accounts_dashboard()
         self.lbl_storage_path.configure(text=get_download_folder())
         self.frame_dashboard.pack(fill="both", expand=True)
@@ -6785,136 +5753,6 @@ class MasterMiniApp(ctk.CTk):
         )
         self.btn_save_acc.pack(fill="x", padx=14, pady=(0, 12))
 
-        # ----------------- Telegram MTProto Connection Card -----------------
-        self.frame_mtproto_card = ctk.CTkFrame(self.frame_editor, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
-        self.frame_mtproto_card.pack(fill="x", padx=10, pady=(0, 6))
-
-        lbl_mtproto_sec_title = ctk.CTkLabel(
-            self.frame_mtproto_card,
-            text="🛡️ Telegram MTProto Connection (Censorship Bypass)",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color="#00bcd4"
-        )
-        lbl_mtproto_sec_title.pack(anchor="w", padx=14, pady=(8, 2))
-
-        lbl_mtproto_desc = ctk.CTkLabel(
-            self.frame_mtproto_card,
-            text="Bypasses ISP blocking via official TDLib and fast MTProto proxies.",
-            font=ctk.CTkFont(size=9),
-            text_color="#aaaaaa",
-            wraplength=310,
-            justify="left"
-        )
-        lbl_mtproto_desc.pack(anchor="w", padx=14, pady=(0, 6))
-
-        self.lbl_conn_mode = ctk.CTkLabel(self.frame_mtproto_card, text="Connection Mode:", font=ctk.CTkFont(size=10, weight="bold"))
-        self.lbl_conn_mode.pack(anchor="w", padx=14, pady=(2, 2))
-
-        self.opt_conn_mode = ctk.CTkOptionMenu(
-            self.frame_mtproto_card,
-            values=["Direct Bot API (Normal)", "MTProto via TDLib (Censorship Bypass)"],
-            height=28,
-            font=ctk.CTkFont(size=10)
-        )
-        self.opt_conn_mode.pack(fill="x", padx=14, pady=(0, 6))
-
-        self.lbl_api_id = ctk.CTkLabel(self.frame_mtproto_card, text="Telegram API ID (Official Pre-configured):", font=ctk.CTkFont(size=10, weight="bold"))
-        self.lbl_api_id.pack(anchor="w", padx=14, pady=(2, 2))
-        self.entry_api_id = ctk.CTkEntry(self.frame_mtproto_card, height=28, placeholder_text="2040")
-        self.entry_api_id.pack(fill="x", padx=14, pady=(0, 6))
-
-        self.lbl_api_hash = ctk.CTkLabel(self.frame_mtproto_card, text="Telegram API Hash (Official Pre-configured):", font=ctk.CTkFont(size=10, weight="bold"))
-        self.lbl_api_hash.pack(anchor="w", padx=14, pady=(2, 2))
-
-        frame_hash_row = ctk.CTkFrame(self.frame_mtproto_card, fg_color="transparent")
-        frame_hash_row.pack(fill="x", padx=14, pady=(0, 4))
-
-        self.entry_api_hash = ctk.CTkEntry(frame_hash_row, height=28, show="*", placeholder_text="b18441a1ff607e10a989891a5462e627")
-        self.entry_api_hash.pack(side="left", fill="x", expand=True, padx=(0, 4))
-
-        self.is_apihash_visible = False
-        self.btn_eye_apihash = ctk.CTkButton(
-            frame_hash_row, text="👁️", width=34, height=28,
-            fg_color="#333333", hover_color="#444444", text_color="#FFFFFF",
-            command=self.toggle_apihash_visibility
-        )
-        self.btn_eye_apihash.pack(side="left", padx=(0, 2))
-
-        self.btn_paste_apihash = ctk.CTkButton(
-            frame_hash_row, text="📋", width=38, height=28,
-            fg_color="#333333", hover_color="#444444", text_color="#FFFFFF",
-            command=lambda: self.paste_text_to_entry(self.entry_api_hash)
-        )
-        self.btn_paste_apihash.pack(side="left", padx=(0, 2))
-
-        self.btn_clear_apihash = ctk.CTkButton(
-            frame_hash_row, text="✖", width=28, height=28,
-            fg_color="#c9302c", hover_color="#a02622", text_color="#FFFFFF",
-            command=lambda: self.clear_entry(self.entry_api_hash)
-        )
-        self.btn_clear_apihash.pack(side="left")
-
-        self.lbl_builtin_notice = ctk.CTkLabel(
-            self.frame_mtproto_card,
-            text="🔒 Built-in Official Telegram Desktop keys are active. No setup needed!",
-            font=ctk.CTkFont(size=9, weight="bold"),
-            text_color="#28a748"
-        )
-        self.lbl_builtin_notice.pack(anchor="w", padx=14, pady=(0, 4))
-
-        self.btn_help_dev_api = ctk.CTkButton(
-            self.frame_mtproto_card,
-            text="🌐 Get Free API ID & Hash at my.telegram.org (Click here)",
-            height=22,
-            fg_color="transparent",
-            hover_color="#2b2b2b",
-            text_color="#00bcd4",
-            font=ctk.CTkFont(size=9, underline=True),
-            command=lambda: webbrowser.open("https://my.telegram.org")
-        )
-        self.btn_help_dev_api.pack(anchor="w", padx=14, pady=(0, 6))
-
-        self.chk_enable_mtproto = ctk.CTkCheckBox(
-            self.frame_mtproto_card,
-            text="Enable MTProto Bot Connection",
-            font=ctk.CTkFont(size=10, weight="bold")
-        )
-        self.chk_enable_mtproto.pack(anchor="w", padx=14, pady=(2, 4))
-
-        self.chk_auto_proxy = ctk.CTkCheckBox(
-            self.frame_mtproto_card,
-            text="Automatic MTProto Proxy Selection & Failover",
-            font=ctk.CTkFont(size=10)
-        )
-        self.chk_auto_proxy.pack(anchor="w", padx=14, pady=(0, 8))
-
-        btn_mtproto_row = ctk.CTkFrame(self.frame_mtproto_card, fg_color="transparent")
-        btn_mtproto_row.pack(fill="x", padx=14, pady=(0, 10))
-
-        self.btn_test_mtproto_conn = ctk.CTkButton(
-            btn_mtproto_row,
-            text="⚡ Test Connection",
-            height=28,
-            fg_color="#e0a800",
-            hover_color="#c69500",
-            text_color="#000000",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            command=self.run_connection_test
-        )
-        self.btn_test_mtproto_conn.pack(side="left", fill="x", expand=True, padx=(0, 4))
-
-        self.btn_save_mtproto_settings = ctk.CTkButton(
-            btn_mtproto_row,
-            text="💾 Save Telegram Settings",
-            height=28,
-            fg_color="#28a748",
-            hover_color="#218838",
-            text_color="#FFFFFF",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            command=self.save_telegram_connection_settings
-        )
-        self.btn_save_mtproto_settings.pack(side="left", fill="x", expand=True)
-
         self.frame_bottom_actions = ctk.CTkFrame(self.frame_editor, fg_color="transparent")
         self.frame_bottom_actions.pack(fill="x", padx=10, pady=2)
 
@@ -6948,7 +5786,6 @@ class MasterMiniApp(ctk.CTk):
         self.frame_password_set.pack_forget()
         self.frame_password_auth.pack_forget()
         self.frame_info_guide.pack_forget()
-        self.frame_proxy.pack_forget()
         self.active_account = acc
 
         self.is_token_visible = False
@@ -6972,36 +5809,6 @@ class MasterMiniApp(ctk.CTk):
             self.entry_acc_name.insert(0, f"Account {len(self.accounts) + 1}")
             self.btn_delete.configure(state="disabled")
             self.lbl_edit_title.configure(text="Register New Account")
-
-        # Populate MTProto card settings
-        tg_conn = TELEGRAM_CONNECTION_SETTINGS
-        api_id_val = acc.get("api_id") if acc and acc.get("api_id") else tg_conn.get("api_id", "2040")
-        api_hash_val = acc.get("api_hash") if acc and acc.get("api_hash") else tg_conn.get("api_hash", "b18441a1ff607e10a989891a5462e627")
-        if str(api_id_val).strip() in ("94575", "0", "", "None"):
-            api_id_val = "2040"
-        if str(api_hash_val).strip() in ("a3406de8d171714214e1e32a2f23e239", "", "None"):
-            api_hash_val = "b18441a1ff607e10a989891a5462e627"
-        mode_val = acc.get("connection_mode") if acc and acc.get("connection_mode") else tg_conn.get("mode", "direct")
-        enable_mt = acc.get("use_mtproto") if acc and "use_mtproto" in acc else tg_conn.get("enable_mtproto", False)
-        auto_px = acc.get("auto_proxy") if acc and "auto_proxy" in acc else tg_conn.get("auto_proxy", True)
-
-        self.entry_api_id.delete(0, "end")
-        self.entry_api_id.insert(0, str(api_id_val))
-
-        self.entry_api_hash.delete(0, "end")
-        self.entry_api_hash.insert(0, str(api_hash_val))
-
-        if mode_val == "mtproto" or enable_mt:
-            self.opt_conn_mode.set("MTProto via TDLib (Censorship Bypass)")
-            self.chk_enable_mtproto.select()
-        else:
-            self.opt_conn_mode.set("Direct Bot API (Normal)")
-            self.chk_enable_mtproto.deselect()
-
-        if auto_px:
-            self.chk_auto_proxy.select()
-        else:
-            self.chk_auto_proxy.deselect()
 
         self.frame_editor.pack(fill="both", expand=True)
 
@@ -7289,7 +6096,6 @@ class MasterMiniApp(ctk.CTk):
         self.frame_password_set.pack_forget()
         self.frame_password_auth.pack_forget()
         self.frame_info_guide.pack_forget()
-        self.frame_proxy.pack_forget()
 
         self.active_account = acc
         name = acc.get("name", "Account")
@@ -7983,7 +6789,6 @@ class MasterMiniApp(ctk.CTk):
         self.frame_transfer_hub.pack_forget()
         self.frame_password_auth.pack_forget()
         self.frame_info_guide.pack_forget()
-        self.frame_proxy.pack_forget()
 
         acc_name = self.active_account.get("name", "Account")
         has_pwd = bool(self.active_account.get("pwd_hash"))
@@ -8044,7 +6849,6 @@ class MasterMiniApp(ctk.CTk):
         self.frame_transfer_hub.pack_forget()
         self.frame_password_set.pack_forget()
         self.frame_info_guide.pack_forget()
-        self.frame_proxy.pack_forget()
 
         self._pending_auth_acc = acc
         self.lbl_auth_acc_name.configure(text=f"Account: '{acc.get('name', 'Account')}'")
@@ -8086,19 +6890,7 @@ class MasterMiniApp(ctk.CTk):
         self.frame_transfer_hub.pack_forget()
         self.frame_password_set.pack_forget()
         self.frame_password_auth.pack_forget()
-        self.frame_proxy.pack_forget()
         self.frame_info_guide.pack(fill="both", expand=True)
-
-    def show_proxy_manager(self):
-        """Displays the MTProto Proxy screen."""
-        self.frame_dashboard.pack_forget()
-        self.frame_editor.pack_forget()
-        self.frame_transfer_hub.pack_forget()
-        self.frame_password_set.pack_forget()
-        self.frame_password_auth.pack_forget()
-        self.frame_info_guide.pack_forget()
-        self.load_proxy_settings_into_ui()
-        self.frame_proxy.pack(fill="both", expand=True)
 
     # ----------------- Screen 6: Information & Setup Guide (INFO) -----------------
     def setup_info_guide_ui(self):
@@ -8322,659 +7114,6 @@ class MasterMiniApp(ctk.CTk):
         )
         btn_bottom_back.pack(fill="x", padx=10, pady=(4, 12))
 
-    # ----------------- Screen 7: MTProto & SOCKS5 Proxy Manager (Proxy 🛡️) -----------------
-    def setup_proxy_ui(self):
-        # Header toolbar
-        self.header_proxy = ctk.CTkFrame(self.frame_proxy, fg_color="transparent")
-        self.header_proxy.pack(fill="x", padx=10, pady=(4, 4))
-
-        btn_back = ctk.CTkButton(
-            self.header_proxy,
-            text="◀ Back",
-            width=70,
-            height=26,
-            fg_color="#333333",
-            hover_color="#444444",
-            text_color="#FFFFFF",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            command=self.show_dashboard
-        )
-        btn_back.pack(side="left")
-
-        if self.logo_ctk:
-            lbl_logo = ctk.CTkLabel(self.header_proxy, image=self.logo_ctk, text="")
-            lbl_logo.pack(side="left", padx=8)
-
-        lbl_title = ctk.CTkLabel(
-            self.header_proxy,
-            text="Proxy Shield & MTProto Manager",
-            font=ctk.CTkFont(size=13, weight="bold")
-        )
-        lbl_title.pack(side="left", padx=4)
-
-        # Scrollable container for proxy controls
-        self.scroll_proxy = ctk.CTkScrollableFrame(self.frame_proxy, height=520)
-        self.scroll_proxy.pack(fill="both", expand=True, padx=6, pady=(0, 4))
-
-        # --- Card 1: Active Status & Toggle Card ---
-        card_status = ctk.CTkFrame(self.scroll_proxy, fg_color="#18202b", corner_radius=8, border_width=1, border_color="#0088cc")
-        card_status.pack(fill="x", padx=4, pady=(2, 6))
-
-        row_status = ctk.CTkFrame(card_status, fg_color="transparent")
-        row_status.pack(fill="x", padx=10, pady=(8, 4))
-
-        lbl_status_title = ctk.CTkLabel(
-            row_status,
-            text="Proxy Status:",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color="#00bcd4"
-        )
-        lbl_status_title.pack(side="left")
-
-        self.lbl_proxy_live_status = ctk.CTkLabel(
-            row_status,
-            text="● Direct Mode (No Proxy)",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color="#aaaaaa"
-        )
-        self.lbl_proxy_live_status.pack(side="right")
-
-        self.lbl_proxy_active_info = ctk.CTkLabel(
-            card_status,
-            text="Operating in direct connection mode. Connect to a verified SOCKS5 proxy or local VPN below if Telegram is blocked.",
-            font=ctk.CTkFont(size=9),
-            text_color="#888888",
-            wraplength=330,
-            justify="left"
-        )
-        self.lbl_proxy_active_info.pack(anchor="w", padx=10, pady=(0, 6))
-
-        row_status_btn = ctk.CTkFrame(card_status, fg_color="transparent")
-        row_status_btn.pack(fill="x", padx=10, pady=(0, 8))
-
-        btn_disable_proxy = ctk.CTkButton(
-            row_status_btn,
-            text="🔌 Disable Proxy (Direct Mode)",
-            height=26,
-            fg_color="#333333",
-            hover_color="#dc3545",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            command=self.disable_proxy_settings_gui
-        )
-        btn_disable_proxy.pack(side="left", fill="x", expand=True, padx=(0, 4))
-
-        self.btn_test_proxy_conn = ctk.CTkButton(
-            row_status_btn,
-            text="⚡ Test Telegram Connection",
-            height=26,
-            fg_color="#0088cc",
-            hover_color="#006699",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            command=self.test_proxy_connection_gui
-        )
-        self.btn_test_proxy_conn.pack(side="right", fill="x", expand=True, padx=(4, 0))
-
-        # --- Card 2: Local VPN & Custom Proxy ---
-        card_custom = ctk.CTkFrame(self.scroll_proxy, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
-        card_custom.pack(fill="x", padx=4, pady=(0, 6))
-
-        row_custom_head = ctk.CTkFrame(card_custom, fg_color="transparent")
-        row_custom_head.pack(fill="x", padx=10, pady=(6, 2))
-
-        lbl_custom_title = ctk.CTkLabel(
-            row_custom_head,
-            text="🛡️ Local VPN & Custom Proxy (V2Ray / Clash):",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color="#00bcd4"
-        )
-        lbl_custom_title.pack(side="left")
-
-        btn_detect_vpn = ctk.CTkButton(
-            card_custom,
-            text="🔍 Auto-Detect Local VPN (V2Ray / Clash)",
-            height=28,
-            fg_color="#2b3e50",
-            hover_color="#3a536b",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            command=self.auto_detect_vpn_gui
-        )
-        btn_detect_vpn.pack(fill="x", padx=10, pady=(2, 4))
-
-        row_inputs = ctk.CTkFrame(card_custom, fg_color="transparent")
-        row_inputs.pack(fill="x", padx=10, pady=(0, 8))
-
-        lbl_h = ctk.CTkLabel(row_inputs, text="Host:", font=ctk.CTkFont(size=9))
-        lbl_h.pack(side="left", padx=(0, 2))
-
-        self.entry_custom_host = ctk.CTkEntry(row_inputs, width=95, height=24, font=ctk.CTkFont(size=9))
-        self.entry_custom_host.insert(0, "127.0.0.1")
-        self.entry_custom_host.pack(side="left", padx=(0, 4))
-
-        lbl_p = ctk.CTkLabel(row_inputs, text="Port:", font=ctk.CTkFont(size=9))
-        lbl_p.pack(side="left", padx=(0, 2))
-
-        self.entry_custom_port = ctk.CTkEntry(row_inputs, width=55, height=24, font=ctk.CTkFont(size=9), placeholder_text="10808")
-        self.entry_custom_port.insert(0, "10808")
-        self.entry_custom_port.pack(side="left", padx=(0, 4))
-
-        self.opt_custom_proto = ctk.CTkOptionMenu(
-            row_inputs,
-            values=["SOCKS5", "HTTP"],
-            width=78,
-            height=24,
-            font=ctk.CTkFont(size=9, weight="bold")
-        )
-        self.opt_custom_proto.set("SOCKS5")
-        self.opt_custom_proto.pack(side="left", padx=(0, 4))
-
-        btn_apply_custom = ctk.CTkButton(
-            row_inputs,
-            text="⚡ Connect",
-            width=65,
-            height=24,
-            fg_color="#28a748",
-            hover_color="#218838",
-            font=ctk.CTkFont(size=9, weight="bold"),
-            command=self.apply_custom_proxy_gui
-        )
-        btn_apply_custom.pack(side="left")
-
-        # --- Card 3: Live Verified SOCKS5 Proxies ---
-        card_socks5 = ctk.CTkFrame(self.scroll_proxy, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
-        card_socks5.pack(fill="x", padx=4, pady=(0, 6))
-
-        row_socks_head = ctk.CTkFrame(card_socks5, fg_color="transparent")
-        row_socks_head.pack(fill="x", padx=10, pady=(6, 2))
-
-        lbl_socks_title = ctk.CTkLabel(
-            row_socks_head,
-            text="🟢 Live SOCKS5 Proxies (App & Bot API):",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color="#00bcd4"
-        )
-        lbl_socks_title.pack(side="left")
-
-        self.btn_refresh_socks = ctk.CTkButton(
-            card_socks5,
-            text="🔄 Fetch Verified SOCKS5 Proxies",
-            height=30,
-            fg_color="#28a748",
-            hover_color="#218838",
-            text_color="#FFFFFF",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            command=self.refresh_socks5_proxies_gui
-        )
-        self.btn_refresh_socks.pack(fill="x", padx=10, pady=(4, 4))
-
-        self.lbl_socks5_fetch_status = ctk.CTkLabel(
-            card_socks5,
-            text="Press button above to load live SOCKS5 proxies tested directly against Telegram Bot API.",
-            font=ctk.CTkFont(size=9),
-            text_color="#888888"
-        )
-        self.lbl_socks5_fetch_status.pack(anchor="w", padx=10, pady=(0, 6))
-
-        self.frame_socks5_list = ctk.CTkFrame(card_socks5, fg_color="transparent")
-        self.frame_socks5_list.pack(fill="x", padx=6, pady=(0, 6))
-
-        # --- Card 4: SoliSpirit MTProto Live Feed ---
-        card_soli = ctk.CTkFrame(self.scroll_proxy, fg_color="#202020", corner_radius=8, border_width=1, border_color="#333333")
-        card_soli.pack(fill="x", padx=4, pady=(0, 6))
-
-        row_soli_head = ctk.CTkFrame(card_soli, fg_color="transparent")
-        row_soli_head.pack(fill="x", padx=10, pady=(6, 2))
-
-        lbl_soli_title = ctk.CTkLabel(
-            row_soli_head,
-            text="🌐 SoliSpirit/mtproto Live Feed (Telegram Desktop):",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color="#00bcd4"
-        )
-        lbl_soli_title.pack(side="left")
-
-        self.btn_refresh_soli = ctk.CTkButton(
-            card_soli,
-            text="🔄 Fetch MTProto Proxies (SoliSpirit)",
-            height=30,
-            fg_color="#0088cc",
-            hover_color="#006699",
-            text_color="#FFFFFF",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            command=self.refresh_solispirit_proxies_gui
-        )
-        self.btn_refresh_soli.pack(fill="x", padx=10, pady=(4, 4))
-
-        self.lbl_soli_fetch_status = ctk.CTkLabel(
-            card_soli,
-            text="Press button above to load live MTProto proxies for Telegram Desktop client.",
-            font=ctk.CTkFont(size=9),
-            text_color="#888888"
-        )
-        self.lbl_soli_fetch_status.pack(anchor="w", padx=10, pady=(0, 6))
-
-        # Dynamic Container inside Card 4
-        self.frame_soli_list = ctk.CTkFrame(card_soli, fg_color="transparent")
-        self.frame_soli_list.pack(fill="x", padx=6, pady=(0, 6))
-
-        # Floating Notification Message Toast
-        self.lbl_proxy_msg = ctk.CTkLabel(
-            self.scroll_proxy,
-            text="",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            wraplength=330
-        )
-        self.lbl_proxy_msg.pack(padx=10, pady=(2, 6))
-
-    def test_proxy_connection_gui(self):
-        """Tests live connectivity to Telegram Bot API through the active proxy."""
-        self.btn_test_proxy_conn.configure(state="disabled", text="⏳ Testing connection...")
-
-        def _worker():
-            token = ""
-            if self.active_account:
-                token = self.active_account.get("token", "").strip()
-            elif self.accounts:
-                token = self.accounts[0].get("token", "").strip()
-
-            if not token:
-                def _err():
-                    self.btn_test_proxy_conn.configure(state="normal", text="⚡ Test Telegram Connection")
-                    self._show_proxy_msg("⚠️ Please register an account with a Bot Token first.", "#f39c12")
-                self.after(0, _err)
-                return
-
-            sess = get_telegram_session()
-            base_url = get_active_telegram_base_url()
-            t0 = time.time()
-            try:
-                r = sess.get(f"{base_url}/bot{token}/getMe", timeout=(4.0, 6.0))
-                lat = round((time.time() - t0) * 1000, 1)
-                data = r.json()
-                if data.get("ok"):
-                    bot_name = data.get("result", {}).get("username", "Bot")
-                    res_msg = f"✅ Connected to @{bot_name} successfully! (Latency: {lat} ms)"
-                    col = "#28a748"
-                else:
-                    res_msg = f"⚠️ Telegram Error: {data.get('description')}"
-                    col = "#f39c12"
-            except Exception as e:
-                res_msg = f"❌ Connection failed: {e}"
-                col = "#dc3545"
-
-            def _done():
-                self.btn_test_proxy_conn.configure(state="normal", text="⚡ Test Telegram Connection")
-                self._show_proxy_msg(res_msg, col)
-            self.after(0, _done)
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def auto_detect_vpn_gui(self):
-        """Probes localhost for running proxy clients and populates inputs."""
-        detected = detect_local_proxies()
-        if detected:
-            first = detected[0]
-            self.entry_custom_host.delete(0, "end")
-            self.entry_custom_host.insert(0, first.get("host", "127.0.0.1"))
-            self.entry_custom_port.delete(0, "end")
-            self.entry_custom_port.insert(0, str(first.get("port", 10808)))
-            self.opt_custom_proto.set(first.get("proto", "SOCKS5"))
-            self._show_proxy_msg(f"✅ Found running local VPN: {first.get('label')} ({first.get('host')}:{first.get('port')})!", "#28a748")
-        else:
-            self._show_proxy_msg("⚠️ No local VPN detected on ports 10808, 7890, or 1080. Enter host & port manually.", "#f39c12")
-
-    def apply_custom_proxy_gui(self):
-        """Activates custom manual proxy settings."""
-        host = self.entry_custom_host.get().strip()
-        port = self.entry_custom_port.get().strip()
-        proto = self.opt_custom_proto.get().strip().upper()
-        if not host or not port:
-            self._show_proxy_msg("❌ Please enter both Host and Port.", "#dc3545")
-            return
-        px_data = {
-            "server": host,
-            "port": port,
-            "secret": "",
-            "proto": proto
-        }
-        self.activate_proxy_item(px_data)
-
-    def refresh_socks5_proxies_gui(self):
-        """Fetches live SOCKS5 proxies tested directly against Telegram Bot API."""
-        self.btn_refresh_socks.configure(state="disabled", text="⏳ Testing & fetching SOCKS5 proxies...")
-        self.lbl_socks5_fetch_status.configure(text="Scanning verified GitHub lists and testing Telegram Bot API...", text_color="#f39c12")
-
-        def _worker():
-            proxies = fetch_live_socks5_proxies(limit=25)
-            def _update():
-                self.btn_refresh_socks.configure(state="normal", text="🔄 Fetch Verified SOCKS5 Proxies")
-                for w in self.frame_socks5_list.winfo_children():
-                    w.destroy()
-
-                if not proxies:
-                    self.lbl_socks5_fetch_status.configure(text="❌ Failed to reach proxy feeds. Check internet or local VPN.", text_color="#dc3545")
-                    return
-
-                self.lbl_socks5_fetch_status.configure(
-                    text=f"✅ Loaded {len(proxies)} verified SOCKS5 proxies ready for PC Remote Pro.",
-                    text_color="#28a748"
-                )
-
-                for p in proxies:
-                    card = ctk.CTkFrame(self.frame_socks5_list, fg_color="#181818", corner_radius=6, border_width=1, border_color="#2c2c2c")
-                    card.pack(fill="x", pady=2)
-
-                    row_top = ctk.CTkFrame(card, fg_color="transparent")
-                    row_top.pack(fill="x", padx=8, pady=(4, 2))
-
-                    server_display = f"SOCKS5: {p['server']}:{p['port']}"
-                    lbl_srv = ctk.CTkLabel(row_top, text=server_display, font=ctk.CTkFont(size=10, weight="bold"), text_color="#FFFFFF")
-                    lbl_srv.pack(side="left")
-
-                    ping_val = p.get("ping", 0.0)
-                    ping_col = "#28a748" if ping_val < 300 else ("#f39c12" if ping_val < 700 else "#dc3545")
-                    lbl_ping = ctk.CTkLabel(row_top, text=f"⚡ {ping_val:.0f} ms", font=ctk.CTkFont(size=9, weight="bold"), text_color=ping_col)
-                    lbl_ping.pack(side="right")
-
-                    row_act = ctk.CTkFrame(card, fg_color="transparent")
-                    row_act.pack(fill="x", padx=8, pady=(0, 4))
-
-                    btn_conn_app = ctk.CTkButton(
-                        row_act,
-                        text="⚡ Connect App",
-                        width=105,
-                        height=24,
-                        fg_color="#28a748",
-                        hover_color="#218838",
-                        font=ctk.CTkFont(size=9, weight="bold"),
-                        command=lambda px=p: self.activate_proxy_item(px)
-                    )
-                    btn_conn_app.pack(side="left", padx=(0, 4))
-
-                    btn_open_tg = ctk.CTkButton(
-                        row_act,
-                        text="🚀 Open in Telegram",
-                        width=115,
-                        height=24,
-                        fg_color="#0088cc",
-                        hover_color="#006699",
-                        font=ctk.CTkFont(size=9, weight="bold"),
-                        command=lambda px=p: open_telegram_proxy(px["server"], px["port"], proto="SOCKS5")
-                    )
-                    btn_open_tg.pack(side="left", padx=(0, 4))
-
-                    btn_copy = ctk.CTkButton(
-                        row_act,
-                        text="📋 Copy",
-                        width=45,
-                        height=24,
-                        fg_color="#333333",
-                        hover_color="#444444",
-                        font=ctk.CTkFont(size=9),
-                        command=lambda px=p: self._copy_link_to_clipboard(px.get("link", ""))
-                    )
-                    btn_copy.pack(side="right")
-
-            self.after(0, _update)
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def refresh_solispirit_proxies_gui(self):
-        """Fetches live MTProto proxies from SoliSpirit/mtproto and displays them in the GUI."""
-        self.btn_refresh_soli.configure(state="disabled", text="⏳ Fetching live proxies from SoliSpirit...")
-        self.lbl_soli_fetch_status.configure(text="Downloading all_proxies.txt and checking latency...", text_color="#f39c12")
-
-        def _worker():
-            proxies = fetch_solispirit_proxies(limit=30)
-            def _update():
-                self.btn_refresh_soli.configure(state="normal", text="🔄 Fetch MTProto Proxies (SoliSpirit)")
-                for w in self.frame_soli_list.winfo_children():
-                    w.destroy()
-
-                if not proxies:
-                    self.lbl_soli_fetch_status.configure(text="❌ Failed to fetch proxies. Check internet connection.", text_color="#dc3545")
-                    return
-
-                online_count = sum(1 for p in proxies if p.get("online"))
-                self.lbl_soli_fetch_status.configure(
-                    text=f"✅ Loaded {len(proxies)} proxies ({online_count} online & verified). Sorted by latency.",
-                    text_color="#28a748"
-                )
-
-                for p in proxies:
-                    card = ctk.CTkFrame(self.frame_soli_list, fg_color="#181818", corner_radius=6, border_width=1, border_color="#2c2c2c")
-                    card.pack(fill="x", pady=2)
-
-                    row_top = ctk.CTkFrame(card, fg_color="transparent")
-                    row_top.pack(fill="x", padx=8, pady=(4, 2))
-
-                    server_display = f"{p['server']}:{p['port']}"
-                    lbl_srv = ctk.CTkLabel(row_top, text=server_display, font=ctk.CTkFont(size=10, weight="bold"), text_color="#FFFFFF")
-                    lbl_srv.pack(side="left")
-
-                    if p.get("online"):
-                        ping_val = p.get("ping", 0.0)
-                        ping_col = "#28a748" if ping_val < 150 else ("#f39c12" if ping_val < 350 else "#dc3545")
-                        lbl_ping = ctk.CTkLabel(row_top, text=f"⚡ {ping_val:.0f} ms", font=ctk.CTkFont(size=9, weight="bold"), text_color=ping_col)
-                    else:
-                        lbl_ping = ctk.CTkLabel(row_top, text="● Offline", font=ctk.CTkFont(size=9), text_color="#888888")
-                    lbl_ping.pack(side="right")
-
-                    row_act = ctk.CTkFrame(card, fg_color="transparent")
-                    row_act.pack(fill="x", padx=8, pady=(0, 4))
-
-                    btn_open_tg = ctk.CTkButton(
-                        row_act,
-                        text="🚀 Open in Telegram",
-                        width=130,
-                        height=24,
-                        fg_color="#0088cc",
-                        hover_color="#006699",
-                        font=ctk.CTkFont(size=9, weight="bold"),
-                        command=lambda px=p: open_telegram_proxy(px["server"], px["port"], px["secret"], proto="MTPROTO")
-                    )
-                    btn_open_tg.pack(side="left", padx=(0, 4))
-
-                    btn_copy = ctk.CTkButton(
-                        row_act,
-                        text="📋 Copy",
-                        width=50,
-                        height=24,
-                        fg_color="#333333",
-                        hover_color="#444444",
-                        font=ctk.CTkFont(size=9),
-                        command=lambda px=p: self._copy_link_to_clipboard(px.get("link", ""))
-                    )
-                    btn_copy.pack(side="right")
-
-            self.after(0, _update)
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def activate_proxy_item(self, proxy_data: dict):
-        """Activates and saves selected SOCKS5 or HTTP proxy."""
-        global PROXY_SETTINGS
-        proto = str(proxy_data.get("proto", "SOCKS5")).upper()
-        PROXY_SETTINGS["server"] = proxy_data.get("server", "").strip()
-        PROXY_SETTINGS["port"] = str(proxy_data.get("port", "")).strip()
-        PROXY_SETTINGS["secret"] = proxy_data.get("secret", "").strip()
-        PROXY_SETTINGS["proto"] = proto
-        PROXY_SETTINGS["enabled"] = True
-
-        save_config(self.accounts, autostart=self.config.get("autostart", True), proxy=PROXY_SETTINGS)
-        apply_global_proxy_layer()
-
-        for tok in list(ACTIVE_BOT_REGISTRY.keys()):
-            self.stop_bot(tok)
-        self.after(600, self.start_all_bots)
-
-        self.load_proxy_settings_into_ui()
-        self._show_proxy_msg(f"✅ {proto} Proxy {PROXY_SETTINGS['server']}:{PROXY_SETTINGS['port']} activated for PC Remote Pro!", "#28a748")
-
-    def disable_proxy_settings_gui(self):
-        """Disables proxy settings and restores direct connection mode."""
-        global PROXY_SETTINGS
-        PROXY_SETTINGS["enabled"] = False
-        save_config(self.accounts, autostart=self.config.get("autostart", True), proxy=PROXY_SETTINGS)
-        apply_global_proxy_layer()
-
-        for tok in list(ACTIVE_BOT_REGISTRY.keys()):
-            self.stop_bot(tok)
-        self.after(600, self.start_all_bots)
-
-        self.load_proxy_settings_into_ui()
-        self._show_proxy_msg("🔌 Proxy disabled. Switched back to direct connection.", "#17a2b8")
-
-    def load_proxy_settings_into_ui(self):
-        """Refreshes status label in the proxy UI based on active PROXY_SETTINGS."""
-        global PROXY_SETTINGS
-        if PROXY_SETTINGS.get("enabled"):
-            proto = str(PROXY_SETTINGS.get("proto", "SOCKS5")).upper()
-            server = PROXY_SETTINGS.get("server", "")
-            port = PROXY_SETTINGS.get("port", "")
-
-            if proto in ("SOCKS5", "HTTP"):
-                self.lbl_proxy_live_status.configure(text=f"● Proxy Active ({proto})", text_color="#28a748")
-                self.lbl_proxy_active_info.configure(
-                    text=f"Active Proxy: {proto.lower()}://{server}:{port}\n(All Telegram bot traffic, file transfers, and messages are routed securely through proxy shield)",
-                    text_color="#28a748"
-                )
-            else:
-                self.lbl_proxy_live_status.configure(text="● MTProto Active (Telegram Desktop Only)", text_color="#f39c12")
-                self.lbl_proxy_active_info.configure(
-                    text=f"Active MTProto: {server}:{port}\n(MTProto is for Telegram Desktop app. To route PC Remote Pro bot and files, select a SOCKS5 proxy or local VPN below)",
-                    text_color="#f39c12"
-                )
-        else:
-            self.lbl_proxy_live_status.configure(text="● Direct Mode (No Proxy)", text_color="#aaaaaa")
-            self.lbl_proxy_active_info.configure(
-                text="Operating in direct connection mode (No Proxy). If Telegram is blocked in your region, select a SOCKS5 proxy or local VPN below.",
-                text_color="#888888"
-            )
-
-    def _copy_link_to_clipboard(self, link_text: str):
-        try:
-            self.clipboard_clear()
-            self.clipboard_append(link_text)
-            self._show_proxy_msg("📋 Proxy link copied to clipboard!", "#0088cc")
-        except Exception:
-            pass
-
-    def _show_proxy_msg(self, text, color="#28a748"):
-        try:
-            self.lbl_proxy_msg.configure(text=text, text_color=color)
-            self.after(5500, lambda: self.lbl_proxy_msg.configure(text="") if self.lbl_proxy_msg.cget("text") == text else None)
-        except Exception:
-            pass
-
-
-    def toggle_apihash_visibility(self):
-        self.is_apihash_visible = not getattr(self, "is_apihash_visible", False)
-        if self.is_apihash_visible:
-            self.entry_api_hash.configure(show="")
-            self.btn_eye_apihash.configure(text="👁️‍🗨️")
-        else:
-            self.entry_api_hash.configure(show="*")
-            self.btn_eye_apihash.configure(text="👁️")
-
-    def save_telegram_connection_settings(self):
-        is_mt_mode = (self.opt_conn_mode.get() == "MTProto via TDLib (Censorship Bypass)" or bool(self.chk_enable_mtproto.get()))
-        api_id_in = self.entry_api_id.get().strip() or "2040"
-        api_hash_in = self.entry_api_hash.get().strip() or "b18441a1ff607e10a989891a5462e627"
-        auto_px_in = bool(self.chk_auto_proxy.get())
-
-        TELEGRAM_CONNECTION_SETTINGS["mode"] = "mtproto" if is_mt_mode else "direct"
-        TELEGRAM_CONNECTION_SETTINGS["enable_mtproto"] = is_mt_mode
-        TELEGRAM_CONNECTION_SETTINGS["api_id"] = api_id_in
-        TELEGRAM_CONNECTION_SETTINGS["api_hash"] = api_hash_in
-        TELEGRAM_CONNECTION_SETTINGS["auto_proxy"] = auto_px_in
-
-        if self.active_account:
-            self.active_account["connection_mode"] = "mtproto" if is_mt_mode else "direct"
-            self.active_account["use_mtproto"] = is_mt_mode
-            self.active_account["api_id"] = api_id_in
-            self.active_account["api_hash"] = api_hash_in
-            self.active_account["auto_proxy"] = auto_px_in
-
-        save_config(self.accounts, autostart=bool(self.chk_autostart.get()))
-        self.start_all_bots()
-        messagebox.showinfo("Saved", "Telegram Connection Settings saved and applied!", parent=self)
-
-    def update_connection_monitor_ui(self):
-        try:
-            is_any_mtproto = False
-            active_adapter = None
-            is_any_alive = False
-
-            for token, entry in ACTIVE_BOT_REGISTRY.items():
-                if entry.get("mode") == "mtproto" and entry.get("adapter"):
-                    is_any_mtproto = True
-                    active_adapter = entry["adapter"]
-                    is_any_alive = True
-                    break
-                t = entry.get("thread")
-                if t and t.is_alive():
-                    is_any_alive = True
-
-            if is_any_mtproto and active_adapter:
-                self.lbl_mon_mode.configure(text="MTProto via TDLib (Censorship Bypass)", text_color="#00bcd4")
-                self.lbl_mon_engine.configure(text="TDLib Native v1.8.70 (x64 DLL)", text_color="#28a748")
-                
-                st = getattr(active_adapter, "connection_state", "connecting")
-                is_auth_ok = False
-                for t_tok, ent in ACTIVE_BOT_REGISTRY.items():
-                    auth_obj = ent.get("auth")
-                    if auth_obj and getattr(auth_obj, "is_authorized", None) and auth_obj.is_authorized.is_set():
-                        is_auth_ok = True
-                        break
-
-                if st == "ready" or is_auth_ok:
-                    self.lbl_mon_badge.configure(text="🟢 Connected & Ready", text_color="#28a748")
-                elif st in ("connecting", "updating"):
-                    self.lbl_mon_badge.configure(text="🟡 Connecting...", text_color="#e0a800")
-                else:
-                    self.lbl_mon_badge.configure(text=f"⚪ {st.capitalize()}", text_color="#888888")
-
-                px = GLOBAL_PROXY_MANAGER.active_proxy
-                if px:
-                    self.lbl_mon_server.configure(text=f"{px['server']}:{px['port']}")
-                    ping = px.get("ping", 0)
-                    self.lbl_mon_latency.configure(text=f"{ping:.0f} ms")
-                else:
-                    self.lbl_mon_server.configure(text="Auto-Selecting Proxy...")
-                    self.lbl_mon_latency.configure(text="-- ms")
-
-                recv_t = getattr(active_adapter, "last_received_msg_time", 0)
-                sent_t = getattr(active_adapter, "last_sent_msg_time", 0)
-                r_str = datetime.fromtimestamp(recv_t).strftime("%H:%M:%S") if recv_t else "None"
-                s_str = datetime.fromtimestamp(sent_t).strftime("%H:%M:%S") if sent_t else "None"
-                self.lbl_mon_activity.configure(text=f"In: {r_str}  •  Out: {s_str}")
-
-                num_proxies = len(GLOBAL_PROXY_MANAGER.ranked_proxies)
-                self.lbl_mon_failover.configure(
-                    text=f"Active ({num_proxies} candidate proxies ranked)",
-                    text_color="#28a748"
-                )
-            elif is_any_alive:
-                self.lbl_mon_mode.configure(text="Direct Bot API (Normal)", text_color="#FFFFFF")
-                self.lbl_mon_engine.configure(text="python-telegram-bot (HTTPS)", text_color="#cccccc")
-                self.lbl_mon_badge.configure(text="🟢 Online", text_color="#28a748")
-                self.lbl_mon_server.configure(text="None (Direct Connection)")
-                self.lbl_mon_latency.configure(text="Direct")
-                self.lbl_mon_activity.configure(text="Ready")
-                self.lbl_mon_failover.configure(text="Standby (Direct Mode)", text_color="#888888")
-            else:
-                self.lbl_mon_badge.configure(text="⚪ Offline", text_color="#888888")
-                self.lbl_mon_server.configure(text="None")
-                self.lbl_mon_latency.configure(text="-- ms")
-                self.lbl_mon_failover.configure(text="Standby", text_color="#888888")
-        except Exception:
-            pass
-
-        try:
-            self.after(2500, self.update_connection_monitor_ui)
-        except Exception:
-            pass
-
     def run_connection_test(self):
         token = self.entry_token.get().strip()
         chat_id_str = self.entry_chatid.get().strip()
@@ -8992,27 +7131,16 @@ class MasterMiniApp(ctk.CTk):
             messagebox.showerror("Validation Error", "Chat ID must contain numbers only.", parent=self)
             return
 
-        is_mt = (self.opt_conn_mode.get() == "MTProto via TDLib (Censorship Bypass)" or bool(self.chk_enable_mtproto.get()))
-        api_id = int(self.entry_api_id.get().strip() or 2040)
-        api_hash = self.entry_api_hash.get().strip() or "b18441a1ff607e10a989891a5462e627"
-
         self.btn_test_conn.configure(state="disabled", text="⏳ Testing connection...")
-        if hasattr(self, 'btn_test_mtproto_conn'):
-            self.btn_test_mtproto_conn.configure(state="disabled", text="⏳ Testing...")
+        self.update_idletasks()
 
-        def _bg_test():
-            success, msg = test_telegram_connection(token, chat_id, use_mtproto=is_mt, api_id=api_id, api_hash=api_hash)
-            def _done():
-                self.btn_test_conn.configure(state="normal", text="⚡ Test Bot Connection")
-                if hasattr(self, 'btn_test_mtproto_conn'):
-                    self.btn_test_mtproto_conn.configure(state="normal", text="⚡ Test Connection")
-                if success:
-                    messagebox.showinfo("Connection Success", msg, parent=self)
-                else:
-                    messagebox.showerror("Connection Diagnostic", msg, parent=self)
-            self.after(0, _done)
+        success, msg = test_telegram_connection(token, chat_id)
+        self.btn_test_conn.configure(state="normal", text="⚡ Test Bot Connection")
 
-        threading.Thread(target=_bg_test, daemon=True).start()
+        if success:
+            messagebox.showinfo("Connection Success", msg, parent=self)
+        else:
+            messagebox.showerror("Connection Diagnostic", msg, parent=self)
 
     def set_account_password(self):
         if not self.active_account:
@@ -9039,38 +7167,17 @@ class MasterMiniApp(ctk.CTk):
             messagebox.showerror("Validation Error", "Chat ID must contain numbers only.", parent=self)
             return
 
-        is_mt_mode = (self.opt_conn_mode.get() == "MTProto via TDLib (Censorship Bypass)" or bool(self.chk_enable_mtproto.get()))
-        api_id_in = self.entry_api_id.get().strip() or "2040"
-        api_hash_in = self.entry_api_hash.get().strip() or "b18441a1ff607e10a989891a5462e627"
-        auto_px_in = bool(self.chk_auto_proxy.get())
-
-        TELEGRAM_CONNECTION_SETTINGS["mode"] = "mtproto" if is_mt_mode else "direct"
-        TELEGRAM_CONNECTION_SETTINGS["enable_mtproto"] = is_mt_mode
-        TELEGRAM_CONNECTION_SETTINGS["api_id"] = api_id_in
-        TELEGRAM_CONNECTION_SETTINGS["api_hash"] = api_hash_in
-        TELEGRAM_CONNECTION_SETTINGS["auto_proxy"] = auto_px_in
-
         if self.active_account:
             self.active_account["name"] = name
             self.active_account["token"] = token
             self.active_account["chat_id"] = chat_id
-            self.active_account["connection_mode"] = "mtproto" if is_mt_mode else "direct"
-            self.active_account["use_mtproto"] = is_mt_mode
-            self.active_account["api_id"] = api_id_in
-            self.active_account["api_hash"] = api_hash_in
-            self.active_account["auto_proxy"] = auto_px_in
         else:
             new_acc = {
                 "id": str(int(time.time() * 1000)),
                 "name": name,
                 "token": token,
                 "chat_id": chat_id,
-                "pwd_hash": "",
-                "connection_mode": "mtproto" if is_mt_mode else "direct",
-                "use_mtproto": is_mt_mode,
-                "api_id": api_id_in,
-                "api_hash": api_hash_in,
-                "auto_proxy": auto_px_in
+                "pwd_hash": ""
             }
             self.accounts.append(new_acc)
             self.active_account = new_acc
@@ -9227,28 +7334,7 @@ class MasterMiniApp(ctk.CTk):
             try:
                 cid = int(cid_str)
                 if token and cid:
-                    token_groups.setdefault(token, {
-                        "users": {},
-                        "is_mtproto": False,
-                        "api_id": 2040,
-                        "api_hash": "b18441a1ff607e10a989891a5462e627"
-                    })
-                    token_groups[token]["users"][cid] = {"name": name, "acc_id": acc.get("id")}
-                    if acc.get("connection_mode") == "mtproto" or acc.get("use_mtproto") or TELEGRAM_CONNECTION_SETTINGS.get("enable_mtproto"):
-                        token_groups[token]["is_mtproto"] = True
-                        raw_aid = acc.get("api_id") or TELEGRAM_CONNECTION_SETTINGS.get("api_id") or 2040
-                        try:
-                            aid_int = int(raw_aid)
-                            if aid_int in (0, 94575):
-                                aid_int = 2040
-                        except Exception:
-                            aid_int = 2040
-                        token_groups[token]["api_id"] = aid_int
-
-                        raw_hash = acc.get("api_hash") or TELEGRAM_CONNECTION_SETTINGS.get("api_hash") or "b18441a1ff607e10a989891a5462e627"
-                        if not raw_hash or raw_hash == "a3406de8d171714214e1e32a2f23e239":
-                            raw_hash = "b18441a1ff607e10a989891a5462e627"
-                        token_groups[token]["api_hash"] = raw_hash
+                    token_groups.setdefault(token, {})[cid] = {"name": name, "acc_id": acc.get("id")}
             except (ValueError, TypeError):
                 continue
 
@@ -9258,40 +7344,19 @@ class MasterMiniApp(ctk.CTk):
                 self.stop_bot(existing_token)
 
         valid_accounts_count = 0
-        for token, grp in token_groups.items():
-            users = grp["users"]
-            is_mt = grp["is_mtproto"]
-            api_id = grp["api_id"]
-            api_hash = grp["api_hash"]
+        for token, users in token_groups.items():
             valid_accounts_count += len(users)
-
             if token in ACTIVE_BOT_REGISTRY:
                 ACTIVE_BOT_REGISTRY[token]["user_map"] = dict(users)
                 ACTIVE_BOT_REGISTRY[token]["stop_requested"] = False
             else:
                 user_dict_ref = dict(users)
-                if is_mt:
-                    thread = threading.Thread(
-                        target=start_tdlib_bot_thread,
-                        args=(token, user_dict_ref, api_id, api_hash),
-                        daemon=True
-                    )
-                    mode_str = "mtproto"
-                else:
-                    thread = threading.Thread(
-                        target=start_bot_thread,
-                        args=(token, user_dict_ref),
-                        daemon=True
-                    )
-                    mode_str = "direct"
-
+                thread = threading.Thread(target=start_bot_thread, args=(token, user_dict_ref), daemon=True)
                 ACTIVE_BOT_REGISTRY[token] = {
                     "thread": thread,
                     "user_map": user_dict_ref,
                     "app": None,
                     "loop": None,
-                    "adapter": None,
-                    "mode": mode_str,
                     "stop_requested": False
                 }
                 thread.start()
@@ -9302,110 +7367,72 @@ class MasterMiniApp(ctk.CTk):
         )
 
     def watchdog_supervisor(self):
-        def _bg_watchdog():
-            try:
-                # Fast background internet connectivity check (never blocks GUI thread)
-                is_online = SMART_NETWORK_WATCHDOG.check_internet()
+        try:
+            # Check real internet connectivity
+            is_online = SMART_NETWORK_WATCHDOG.check_internet()
 
-                token_groups = {}
-                for acc in self.accounts:
-                    token = acc.get("token", "").strip()
-                    cid_str = str(acc.get("chat_id", "")).strip()
-                    name = acc.get("name", "User").strip()
-                    try:
-                        cid = int(cid_str)
-                        if token and cid:
-                            token_groups.setdefault(token, {})[cid] = {"name": name, "acc_id": acc.get("id")}
-                    except (ValueError, TypeError):
-                        continue
+            token_groups = {}
+            for acc in self.accounts:
+                token = acc.get("token", "").strip()
+                cid_str = str(acc.get("chat_id", "")).strip()
+                name = acc.get("name", "User").strip()
+                try:
+                    cid = int(cid_str)
+                    if token and cid:
+                        token_groups.setdefault(token, {})[cid] = {"name": name, "acc_id": acc.get("id")}
+                except (ValueError, TypeError):
+                    continue
 
-                active_count = 0
-                for token, users in token_groups.items():
-                    entry = ACTIVE_BOT_REGISTRY.get(token)
-                    needs_restart = False
-                    if not entry:
+            active_count = 0
+            for token, users in token_groups.items():
+                entry = ACTIVE_BOT_REGISTRY.get(token)
+                needs_restart = False
+                if not entry:
+                    needs_restart = True
+                else:
+                    t = entry.get("thread")
+                    if not t or not t.is_alive():
                         needs_restart = True
                     else:
-                        t = entry.get("thread")
-                        if not t or not t.is_alive():
-                            needs_restart = True
-                        else:
-                            active_count += len(users)
-
-                    if needs_restart and is_online:
-                        user_dict_ref = dict(users)
-                        is_mt = False
-                        api_id = 2040
-                        api_hash = "b18441a1ff607e10a989891a5462e627"
-                        for acc in self.accounts:
-                            if acc.get("token", "").strip() == token:
-                                if acc.get("connection_mode") == "mtproto" or acc.get("use_mtproto") or TELEGRAM_CONNECTION_SETTINGS.get("enable_mtproto"):
-                                    is_mt = True
-                                    raw_aid = acc.get("api_id") or TELEGRAM_CONNECTION_SETTINGS.get("api_id") or 2040
-                                    try:
-                                        aid_int = int(raw_aid)
-                                        if aid_int in (0, 94575): aid_int = 2040
-                                    except Exception:
-                                        aid_int = 2040
-                                    api_id = aid_int
-
-                                    raw_hash = acc.get("api_hash") or TELEGRAM_CONNECTION_SETTINGS.get("api_hash") or "b18441a1ff607e10a989891a5462e627"
-                                    if not raw_hash or raw_hash == "a3406de8d171714214e1e32a2f23e239":
-                                        raw_hash = "b18441a1ff607e10a989891a5462e627"
-                                    api_hash = raw_hash
-                                break
-
-                        if is_mt:
-                            thread = threading.Thread(target=start_tdlib_bot_thread, args=(token, user_dict_ref, api_id, api_hash), daemon=True)
-                            mode_str = "mtproto"
-                        else:
-                            thread = threading.Thread(target=start_bot_thread, args=(token, user_dict_ref), daemon=True)
-                            mode_str = "direct"
-
-                        ACTIVE_BOT_REGISTRY[token] = {
-                            "thread": thread,
-                            "user_map": user_dict_ref,
-                            "app": None,
-                            "loop": None,
-                            "adapter": None,
-                            "mode": mode_str,
-                            "stop_requested": False
-                        }
-                        thread.start()
                         active_count += len(users)
 
-                # Update live dashboard and tray status smoothly on main GUI thread
-                def _update_ui():
-                    try:
-                        if not getattr(self, "is_downloading_update", False):
-                            if not self.accounts:
-                                self.lbl_dash_status.configure(text=f"Status: No accounts registered • {APP_VERSION}", text_color="gray")
-                                tray_info = f"{APP_NAME} - {APP_VERSION}"
-                            elif not is_online:
-                                self.lbl_dash_status.configure(text=f"⚠️ Internet Disconnected • Reconnecting... • {APP_VERSION}", text_color="#e0a800")
-                                tray_info = f"{APP_NAME} {APP_VERSION} (Offline ⚠️)"
-                            else:
-                                self.lbl_dash_status.configure(
-                                    text=f"🟢 Online & Active: {active_count} of {len(self.accounts)} accounts connected ✅ • {APP_VERSION}",
-                                    text_color="#28a748"
-                                )
-                                tray_info = f"{APP_NAME} {APP_VERSION} (Online ✅ • Active)"
+                if needs_restart and is_online:
+                    user_dict_ref = dict(users)
+                    thread = threading.Thread(target=start_bot_thread, args=(token, user_dict_ref), daemon=True)
+                    ACTIVE_BOT_REGISTRY[token] = {
+                        "thread": thread,
+                        "user_map": user_dict_ref,
+                        "app": None,
+                        "loop": None,
+                        "stop_requested": False
+                    }
+                    thread.start()
+                    active_count += len(users)
 
-                            if self.tray_icon:
-                                try:
-                                    self.tray_icon.title = tray_info
-                                except Exception:
-                                    pass
+            # Update live dashboard and tray status
+            if not getattr(self, "is_downloading_update", False):
+                if not self.accounts:
+                    self.lbl_dash_status.configure(text=f"Status: No accounts registered • {APP_VERSION}", text_color="gray")
+                    tray_info = f"{APP_NAME} - {APP_VERSION}"
+                elif not is_online:
+                    self.lbl_dash_status.configure(text=f"⚠️ Internet Disconnected • Reconnecting... • {APP_VERSION}", text_color="#e0a800")
+                    tray_info = f"{APP_NAME} {APP_VERSION} (Offline ⚠️)"
+                else:
+                    self.lbl_dash_status.configure(
+                        text=f"🟢 Online & Active: {active_count} of {len(self.accounts)} accounts connected ✅ • {APP_VERSION}",
+                        text_color="#28a748"
+                    )
+                    tray_info = f"{APP_NAME} {APP_VERSION} (Online ✅ • Active)"
+
+                if self.tray_icon:
+                    try:
+                        self.tray_icon.title = tray_info
                     except Exception:
                         pass
-
-                self.after(0, _update_ui)
-            except Exception:
-                pass
-            finally:
-                self.after(10000, self.watchdog_supervisor)
-
-        threading.Thread(target=_bg_watchdog, daemon=True).start()
+        except Exception:
+            pass
+        finally:
+            self.after(10000, self.watchdog_supervisor)
 
     def hide_to_tray(self):
         self.withdraw()
@@ -9417,7 +7444,7 @@ class MasterMiniApp(ctk.CTk):
         try:
             self.deiconify()
             self.state("normal")
-            if not self.frame_dashboard.winfo_ismapped() and not self.frame_editor.winfo_ismapped() and not self.frame_transfer_hub.winfo_ismapped() and not self.frame_password_set.winfo_ismapped() and not self.frame_password_auth.winfo_ismapped() and not self.frame_info_guide.winfo_ismapped() and not self.frame_proxy.winfo_ismapped():
+            if not self.frame_dashboard.winfo_ismapped() and not self.frame_editor.winfo_ismapped() and not self.frame_transfer_hub.winfo_ismapped() and not self.frame_password_set.winfo_ismapped() and not self.frame_password_auth.winfo_ismapped() and not self.frame_info_guide.winfo_ismapped():
                 self.show_dashboard()
             elif self.frame_dashboard.winfo_ismapped():
                 self.refresh_accounts_dashboard()

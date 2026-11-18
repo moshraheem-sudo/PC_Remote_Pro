@@ -56,10 +56,6 @@ Source: "dist\PC_Remote_Pro\*"; DestDir: "{app}"; Flags: ignoreversion recursesu
 Source: "PC_Remote_Pro.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "PC_Remote_Pro.png"; DestDir: "{app}"; Flags: ignoreversion
 Source: "PC_Remote_Pro.jpg"; DestDir: "{app}"; Flags: ignoreversion
-Source: "tdjson.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "libcrypto-3-x64.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "libssl-3-x64.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "z.dll"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\PC_Remote_Pro.ico"
