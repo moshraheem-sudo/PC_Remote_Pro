@@ -483,7 +483,7 @@ async def send_large_file_split_telegram(bot, chat_id: int, file_path: str, auto
                         f"https://api.telegram.org/bot{bot.token}/sendDocument",
                         data={"chat_id": chat_id, "caption": f"📁 File sent from PC:\n{orig_name} ({size_mb:.1f} MB)"},
                         files={"document": (orig_name, fl, "application/octet-stream")},
-                        timeout=600
+                        timeout=(15, 600)
                     )
                 if r.status_code == 200:
                     if progress_callback:
@@ -535,7 +535,7 @@ async def send_large_file_split_telegram(bot, chat_id: int, file_path: str, auto
                         f"https://api.telegram.org/bot{bot.token}/sendDocument",
                         data={"chat_id": chat_id, "caption": f"🗜️ Compressed: {zip_name} ({zip_mb:.1f} MB)"},
                         files={"document": (zip_name, fl, "application/octet-stream")},
-                        timeout=600
+                        timeout=(15, 600)
                     )
             if progress_callback:
                 progress_callback(1.0, f"✅ Successfully compressed and sent: {orig_name}")
@@ -597,7 +597,7 @@ async def send_large_file_split_telegram(bot, chat_id: int, file_path: str, auto
                             f"https://api.telegram.org/bot{bot.token}/sendDocument",
                             data={"chat_id": chat_id, "caption": f"📦 Part [{part_num}/{total_parts}] of: {orig_name}"},
                             files={"document": (part_name, pf, "application/octet-stream")},
-                            timeout=600
+                            timeout=(15, 600)
                         )
                 part_num += 1
                 await asyncio.sleep(1)
@@ -645,7 +645,7 @@ async def send_large_file_split_telegram(bot, chat_id: int, file_path: str, auto
                     f"https://api.telegram.org/bot{bot.token}/sendDocument",
                     data={"chat_id": chat_id, "caption": f"Recombine script for: {orig_name}"},
                     files={"document": (bat_name, bf, "application/octet-stream")},
-                    timeout=600
+                    timeout=(15, 600)
                 )
 
         if progress_callback:
@@ -2487,15 +2487,15 @@ class SmartNetworkWatchdog:
         self.consecutive_fails = 0
 
     def check_internet(self) -> bool:
-        # Fast multi-endpoint check using port 443
+        # Fast multi-endpoint check using port 443 (prioritize ultra-fast public DNS)
         endpoints = [
-            ("api.telegram.org", 443),
             ("1.1.1.1", 443),
-            ("8.8.8.8", 443)
+            ("8.8.8.8", 443),
+            ("api.telegram.org", 443)
         ]
         for host, port in endpoints:
             try:
-                s = socket.create_connection((host, port), timeout=3)
+                s = socket.create_connection((host, port), timeout=2)
                 s.close()
                 return True
             except OSError:
@@ -5338,7 +5338,7 @@ class MasterMiniApp(ctk.CTk):
         self.frame_storage.pack(fill="x", padx=6, pady=4)
 
         header_storage = ctk.CTkFrame(self.frame_storage, fg_color="transparent")
-        header_storage.pack(fill="x", padx=8, pady=(6, 2))
+        header_storage.pack(fill="x", padx=10, pady=(8, 4))
 
         lbl_storage_title = ctk.CTkLabel(
             header_storage,
@@ -5348,44 +5348,51 @@ class MasterMiniApp(ctk.CTk):
         )
         lbl_storage_title.pack(side="left")
 
+        path_box = ctk.CTkFrame(self.frame_storage, fg_color="#181818", corner_radius=6, border_width=1, border_color="#2c2c2c")
+        path_box.pack(fill="x", padx=10, pady=(0, 6))
+
         self.lbl_storage_path = ctk.CTkLabel(
-            self.frame_storage,
-            text=get_download_folder(),
+            path_box,
+            text=os.path.normpath(get_download_folder()),
             font=ctk.CTkFont(size=9),
             text_color="#cccccc",
-            wraplength=310,
+            anchor="w",
             justify="left"
         )
-        self.lbl_storage_path.pack(anchor="w", padx=8, pady=(0, 4))
+        self.lbl_storage_path.pack(fill="x", padx=8, pady=4)
 
         btn_storage_row = ctk.CTkFrame(self.frame_storage, fg_color="transparent")
-        btn_storage_row.pack(fill="x", padx=8, pady=(0, 6))
+        btn_storage_row.pack(fill="x", padx=10, pady=(0, 8))
+        btn_storage_row.grid_columnconfigure(0, weight=1)
+        btn_storage_row.grid_columnconfigure(1, weight=1)
 
         self.btn_change_storage = ctk.CTkButton(
             btn_storage_row,
             text="📂 Change Folder",
-            width=150,
-            height=24,
-            fg_color="#333333",
-            hover_color="#444444",
+            height=30,
+            fg_color="#2b2b2b",
+            hover_color="#3c3c3c",
+            border_width=1,
+            border_color="#444444",
             text_color="#FFFFFF",
-            font=ctk.CTkFont(size=9, weight="bold"),
+            font=ctk.CTkFont(size=10, weight="bold"),
             command=self.choose_storage_folder
         )
-        self.btn_change_storage.pack(side="left", padx=(0, 4))
+        self.btn_change_storage.grid(row=0, column=0, sticky="ew", padx=(0, 4))
 
         self.btn_open_storage = ctk.CTkButton(
             btn_storage_row,
             text="↗️ Open Folder",
-            width=150,
-            height=24,
-            fg_color="#333333",
-            hover_color="#444444",
+            height=30,
+            fg_color="#2b2b2b",
+            hover_color="#3c3c3c",
+            border_width=1,
+            border_color="#444444",
             text_color="#FFFFFF",
-            font=ctk.CTkFont(size=9, weight="bold"),
+            font=ctk.CTkFont(size=10, weight="bold"),
             command=self.open_storage_folder
         )
-        self.btn_open_storage.pack(side="left")
+        self.btn_open_storage.grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
         self.chk_autostart = ctk.CTkCheckBox(
             self.frame_dashboard,
@@ -5473,6 +5480,7 @@ class MasterMiniApp(ctk.CTk):
         curr = get_download_folder()
         chosen = filedialog.askdirectory(initialdir=curr, title="Select Received Files Storage Folder", parent=self)
         if chosen:
+            chosen = os.path.normpath(chosen)
             set_download_folder(chosen)
             save_config(self.accounts, autostart=bool(self.chk_autostart.get()), download_folder=chosen)
             self.lbl_storage_path.configure(text=chosen)
@@ -7132,11 +7140,15 @@ class MasterMiniApp(ctk.CTk):
             return
 
         self.btn_test_conn.configure(state="disabled", text="⏳ Testing connection...")
-        self.update_idletasks()
 
-        success, msg = test_telegram_connection(token, chat_id)
+        def _worker():
+            success, msg = test_telegram_connection(token, chat_id)
+            self.after(0, lambda: self._on_connection_test_result(success, msg))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_connection_test_result(self, success: bool, msg: str):
         self.btn_test_conn.configure(state="normal", text="⚡ Test Bot Connection")
-
         if success:
             messagebox.showinfo("Connection Success", msg, parent=self)
         else:
@@ -7367,49 +7379,61 @@ class MasterMiniApp(ctk.CTk):
         )
 
     def watchdog_supervisor(self):
-        try:
-            # Check real internet connectivity
-            is_online = SMART_NETWORK_WATCHDOG.check_internet()
+        def _bg_check():
+            try:
+                # Check real internet connectivity in background thread
+                is_online = SMART_NETWORK_WATCHDOG.check_internet()
 
-            token_groups = {}
-            for acc in self.accounts:
-                token = acc.get("token", "").strip()
-                cid_str = str(acc.get("chat_id", "")).strip()
-                name = acc.get("name", "User").strip()
-                try:
-                    cid = int(cid_str)
-                    if token and cid:
-                        token_groups.setdefault(token, {})[cid] = {"name": name, "acc_id": acc.get("id")}
-                except (ValueError, TypeError):
-                    continue
+                token_groups = {}
+                for acc in list(self.accounts):
+                    token = acc.get("token", "").strip()
+                    cid_str = str(acc.get("chat_id", "")).strip()
+                    name = acc.get("name", "User").strip()
+                    try:
+                        cid = int(cid_str)
+                        if token and cid:
+                            token_groups.setdefault(token, {})[cid] = {"name": name, "acc_id": acc.get("id")}
+                    except (ValueError, TypeError):
+                        continue
 
-            active_count = 0
-            for token, users in token_groups.items():
-                entry = ACTIVE_BOT_REGISTRY.get(token)
-                needs_restart = False
-                if not entry:
-                    needs_restart = True
-                else:
-                    t = entry.get("thread")
-                    if not t or not t.is_alive():
+                active_count = 0
+                for token, users in token_groups.items():
+                    entry = ACTIVE_BOT_REGISTRY.get(token)
+                    needs_restart = False
+                    if not entry:
                         needs_restart = True
                     else:
+                        t = entry.get("thread")
+                        if not t or not t.is_alive():
+                            needs_restart = True
+                        else:
+                            active_count += len(users)
+
+                    if needs_restart and is_online:
+                        user_dict_ref = dict(users)
+                        thread = threading.Thread(target=start_bot_thread, args=(token, user_dict_ref), daemon=True)
+                        ACTIVE_BOT_REGISTRY[token] = {
+                            "thread": thread,
+                            "user_map": user_dict_ref,
+                            "app": None,
+                            "loop": None,
+                            "stop_requested": False
+                        }
+                        thread.start()
                         active_count += len(users)
 
-                if needs_restart and is_online:
-                    user_dict_ref = dict(users)
-                    thread = threading.Thread(target=start_bot_thread, args=(token, user_dict_ref), daemon=True)
-                    ACTIVE_BOT_REGISTRY[token] = {
-                        "thread": thread,
-                        "user_map": user_dict_ref,
-                        "app": None,
-                        "loop": None,
-                        "stop_requested": False
-                    }
-                    thread.start()
-                    active_count += len(users)
+                # Safely update GUI on the main thread
+                self.after(0, lambda: self._update_watchdog_ui(is_online, active_count))
+            except Exception:
+                pass
+            finally:
+                # Schedule next non-blocking background check in 10s
+                self.after(10000, self.watchdog_supervisor)
 
-            # Update live dashboard and tray status
+        threading.Thread(target=_bg_check, daemon=True).start()
+
+    def _update_watchdog_ui(self, is_online: bool, active_count: int):
+        try:
             if not getattr(self, "is_downloading_update", False):
                 if not self.accounts:
                     self.lbl_dash_status.configure(text=f"Status: No accounts registered • {APP_VERSION}", text_color="gray")
@@ -7431,8 +7455,6 @@ class MasterMiniApp(ctk.CTk):
                         pass
         except Exception:
             pass
-        finally:
-            self.after(10000, self.watchdog_supervisor)
 
     def hide_to_tray(self):
         self.withdraw()
