@@ -1793,6 +1793,11 @@ def load_config():
                                 except Exception:
                                     pass
 
+                        if str(TELEGRAM_CONNECTION_SETTINGS.get("api_id", "")).strip() in ("94575", "0", ""):
+                            TELEGRAM_CONNECTION_SETTINGS["api_id"] = "2040"
+                        if not TELEGRAM_CONNECTION_SETTINGS.get("api_hash") or TELEGRAM_CONNECTION_SETTINGS.get("api_hash") == "a3406de8d171714214e1e32a2f23e239":
+                            TELEGRAM_CONNECTION_SETTINGS["api_hash"] = "b18441a1ff607e10a989891a5462e627"
+
                         # Decrypt in-memory accounts list
                         for acc in data.get("accounts", []):
                             tok = acc.get("token", "")
@@ -1807,6 +1812,10 @@ def load_config():
                                     acc["api_hash"] = decrypt_credential(ah)
                                 except Exception:
                                     pass
+                            if str(acc.get("api_id", "")).strip() in ("94575", "0", ""):
+                                acc["api_id"] = "2040"
+                            if not acc.get("api_hash") or acc.get("api_hash") == "a3406de8d171714214e1e32a2f23e239":
+                                acc["api_hash"] = "b18441a1ff607e10a989891a5462e627"
 
                         apply_global_proxy_layer()
                         return data
@@ -3575,10 +3584,18 @@ def start_tdlib_bot_thread(token: str, user_dict_ref: dict, api_id: int = 2040, 
         entry["auth"] = auth
         entry["mode"] = "mtproto"
 
-    # Wait for TDLib authentication ready
-    ready_event.wait(timeout=25.0)
+    # Wait for TDLib authentication ready with proactive proxy failover
+    if not ready_event.wait(timeout=8.0):
+        print("[TDLib] Initial proxy taking long, triggering auto-failover...")
+        for _ in range(3):
+            next_px = GLOBAL_PROXY_MANAGER.trigger_failover()
+            if next_px:
+                auth.apply_mtproto_proxy(next_px["server"], next_px["port"], next_px["secret"])
+                if ready_event.wait(timeout=6.0):
+                    break
 
     if auth.is_authorized.is_set():
+        adapter.connection_state = "ready"
         hostname = platform.node()
         now_time = datetime.now().strftime("%Y-%m-%d %I:%M %p")
         srv_info = f"{best_proxy['server']}:{best_proxy['port']}" if best_proxy else "MTProto"
@@ -6801,16 +6818,16 @@ class MasterMiniApp(ctk.CTk):
         )
         self.opt_conn_mode.pack(fill="x", padx=14, pady=(0, 6))
 
-        self.lbl_api_id = ctk.CTkLabel(self.frame_mtproto_card, text="Telegram API ID:", font=ctk.CTkFont(size=10, weight="bold"))
+        self.lbl_api_id = ctk.CTkLabel(self.frame_mtproto_card, text="Telegram API ID (Official Pre-configured):", font=ctk.CTkFont(size=10, weight="bold"))
         self.lbl_api_id.pack(anchor="w", padx=14, pady=(2, 2))
         self.entry_api_id = ctk.CTkEntry(self.frame_mtproto_card, height=28, placeholder_text="2040")
         self.entry_api_id.pack(fill="x", padx=14, pady=(0, 6))
 
-        self.lbl_api_hash = ctk.CTkLabel(self.frame_mtproto_card, text="Telegram API Hash:", font=ctk.CTkFont(size=10, weight="bold"))
+        self.lbl_api_hash = ctk.CTkLabel(self.frame_mtproto_card, text="Telegram API Hash (Official Pre-configured):", font=ctk.CTkFont(size=10, weight="bold"))
         self.lbl_api_hash.pack(anchor="w", padx=14, pady=(2, 2))
 
         frame_hash_row = ctk.CTkFrame(self.frame_mtproto_card, fg_color="transparent")
-        frame_hash_row.pack(fill="x", padx=14, pady=(0, 6))
+        frame_hash_row.pack(fill="x", padx=14, pady=(0, 4))
 
         self.entry_api_hash = ctk.CTkEntry(frame_hash_row, height=28, show="*", placeholder_text="b18441a1ff607e10a989891a5462e627")
         self.entry_api_hash.pack(side="left", fill="x", expand=True, padx=(0, 4))
@@ -6836,6 +6853,14 @@ class MasterMiniApp(ctk.CTk):
             command=lambda: self.clear_entry(self.entry_api_hash)
         )
         self.btn_clear_apihash.pack(side="left")
+
+        self.lbl_builtin_notice = ctk.CTkLabel(
+            self.frame_mtproto_card,
+            text="🔒 Built-in Official Telegram Desktop keys are active. No setup needed!",
+            font=ctk.CTkFont(size=9, weight="bold"),
+            text_color="#28a748"
+        )
+        self.lbl_builtin_notice.pack(anchor="w", padx=14, pady=(0, 4))
 
         self.btn_help_dev_api = ctk.CTkButton(
             self.frame_mtproto_card,
@@ -6952,6 +6977,10 @@ class MasterMiniApp(ctk.CTk):
         tg_conn = TELEGRAM_CONNECTION_SETTINGS
         api_id_val = acc.get("api_id") if acc and acc.get("api_id") else tg_conn.get("api_id", "2040")
         api_hash_val = acc.get("api_hash") if acc and acc.get("api_hash") else tg_conn.get("api_hash", "b18441a1ff607e10a989891a5462e627")
+        if str(api_id_val).strip() in ("94575", "0", "", "None"):
+            api_id_val = "2040"
+        if str(api_hash_val).strip() in ("a3406de8d171714214e1e32a2f23e239", "", "None"):
+            api_hash_val = "b18441a1ff607e10a989891a5462e627"
         mode_val = acc.get("connection_mode") if acc and acc.get("connection_mode") else tg_conn.get("mode", "direct")
         enable_mt = acc.get("use_mtproto") if acc and "use_mtproto" in acc else tg_conn.get("enable_mtproto", False)
         auto_px = acc.get("auto_proxy") if acc and "auto_proxy" in acc else tg_conn.get("auto_proxy", True)
@@ -8891,8 +8920,15 @@ class MasterMiniApp(ctk.CTk):
                 self.lbl_mon_engine.configure(text="TDLib Native v1.8.70 (x64 DLL)", text_color="#28a748")
                 
                 st = getattr(active_adapter, "connection_state", "connecting")
-                if st == "ready":
-                    self.lbl_mon_badge.configure(text="🟢 Connected", text_color="#28a748")
+                is_auth_ok = False
+                for t_tok, ent in ACTIVE_BOT_REGISTRY.items():
+                    auth_obj = ent.get("auth")
+                    if auth_obj and getattr(auth_obj, "is_authorized", None) and auth_obj.is_authorized.is_set():
+                        is_auth_ok = True
+                        break
+
+                if st == "ready" or is_auth_ok:
+                    self.lbl_mon_badge.configure(text="🟢 Connected & Ready", text_color="#28a748")
                 elif st in ("connecting", "updating"):
                     self.lbl_mon_badge.configure(text="🟡 Connecting...", text_color="#e0a800")
                 else:
@@ -9200,8 +9236,19 @@ class MasterMiniApp(ctk.CTk):
                     token_groups[token]["users"][cid] = {"name": name, "acc_id": acc.get("id")}
                     if acc.get("connection_mode") == "mtproto" or acc.get("use_mtproto") or TELEGRAM_CONNECTION_SETTINGS.get("enable_mtproto"):
                         token_groups[token]["is_mtproto"] = True
-                        token_groups[token]["api_id"] = int(acc.get("api_id") or TELEGRAM_CONNECTION_SETTINGS.get("api_id") or 2040)
-                        token_groups[token]["api_hash"] = acc.get("api_hash") or TELEGRAM_CONNECTION_SETTINGS.get("api_hash") or "b18441a1ff607e10a989891a5462e627"
+                        raw_aid = acc.get("api_id") or TELEGRAM_CONNECTION_SETTINGS.get("api_id") or 2040
+                        try:
+                            aid_int = int(raw_aid)
+                            if aid_int in (0, 94575):
+                                aid_int = 2040
+                        except Exception:
+                            aid_int = 2040
+                        token_groups[token]["api_id"] = aid_int
+
+                        raw_hash = acc.get("api_hash") or TELEGRAM_CONNECTION_SETTINGS.get("api_hash") or "b18441a1ff607e10a989891a5462e627"
+                        if not raw_hash or raw_hash == "a3406de8d171714214e1e32a2f23e239":
+                            raw_hash = "b18441a1ff607e10a989891a5462e627"
+                        token_groups[token]["api_hash"] = raw_hash
             except (ValueError, TypeError):
                 continue
 
@@ -9294,8 +9341,18 @@ class MasterMiniApp(ctk.CTk):
                             if acc.get("token", "").strip() == token:
                                 if acc.get("connection_mode") == "mtproto" or acc.get("use_mtproto") or TELEGRAM_CONNECTION_SETTINGS.get("enable_mtproto"):
                                     is_mt = True
-                                    api_id = int(acc.get("api_id") or TELEGRAM_CONNECTION_SETTINGS.get("api_id") or 2040)
-                                    api_hash = acc.get("api_hash") or TELEGRAM_CONNECTION_SETTINGS.get("api_hash") or "b18441a1ff607e10a989891a5462e627"
+                                    raw_aid = acc.get("api_id") or TELEGRAM_CONNECTION_SETTINGS.get("api_id") or 2040
+                                    try:
+                                        aid_int = int(raw_aid)
+                                        if aid_int in (0, 94575): aid_int = 2040
+                                    except Exception:
+                                        aid_int = 2040
+                                    api_id = aid_int
+
+                                    raw_hash = acc.get("api_hash") or TELEGRAM_CONNECTION_SETTINGS.get("api_hash") or "b18441a1ff607e10a989891a5462e627"
+                                    if not raw_hash or raw_hash == "a3406de8d171714214e1e32a2f23e239":
+                                        raw_hash = "b18441a1ff607e10a989891a5462e627"
+                                    api_hash = raw_hash
                                 break
 
                         if is_mt:
